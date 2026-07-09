@@ -88,6 +88,16 @@
            (:hold (pay/entitle (assoc-in cap [:amount :value] "11.00") receipt
                                {:included true} "2026-07-09T12:00:00Z"))))))
 
+(deftest treasury-bridge
+  (testing "treasury verify-payment result maps onto entitle's verification"
+    (let [ok  (pay/verification<-treasury {:ok? true :reason :confirmed :entry {:run/kind :confirmed}})
+          bad (pay/verification<-treasury {:ok? false :reason :underpaid})]
+      (is (:grant? (pay/entitle cap receipt ok "2026-07-09T12:00:00Z")))
+      (let [r (pay/entitle cap receipt bad "2026-07-09T12:00:00Z")]
+        (is (not (:grant? r)))
+        (is (= :pay/unverified-settlement (:hold r)))
+        (is (= :underpaid (:reason r)))))))
+
 (deftest unprovisioned-rail-holds-everything
   (let [rail pay/unprovisioned-rail]
     (doseq [r [(pay/-pay! rail {:to "0x" :amount-micros 1})

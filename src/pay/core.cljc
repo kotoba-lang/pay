@@ -184,6 +184,20 @@
        :tx-hash (:tx-hash receipt)
        :record-uri (:record-uri receipt)})))
 
+(defn verification<-treasury
+  "Adapt a kotoba-lang/treasury `verify-payment` result ({:ok? bool
+  :reason kw :entry …}) into the `verification` input `entitle` expects
+  ({:included bool :reason …}). Pure data mapping — pay does not depend
+  on treasury; the consumer composes both:
+
+    (-> (treasury/verify-payment pending onchain opts)
+        pay/verification<-treasury
+        (as-> v (pay/entitle cap receipt v now-iso)))"
+  [{:keys [ok? reason entry]}]
+  {:included (boolean ok?)
+   :reason reason
+   :entry entry})
+
 ;; ─── Rail protocol (the injected on-chain seam) ─────────────────────
 
 (defprotocol PayRail
