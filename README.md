@@ -54,6 +54,35 @@ its donation-only rail on its own side of the substrate axis.
   not a dependency. A consuming app can run crypto + fiat dual-rail by
   composing both.
 
+## x402 (HTTP 402) protocol — `pay.x402`
+
+The `pay.x402` namespace implements the **x402** open micropayment protocol
+that Cloudflare's [Monetization Gateway](https://blog.cloudflare.com/monetization-gateway/)
+standardizes — in-band `402 Payment Required`, price + asset + pay-to in the
+response, buyer pays a stablecoin and re-requests with an `X-PAYMENT` header,
+facilitator verifies, resource served with an `X-PAYMENT-RESPONSE` receipt. No
+redirect, no checkout, no seller onboarding — and it works for autonomous
+**agent** buyers, not just human wallets.
+
+We are our **own facilitator** (via kotoba-lang/treasury's on-chain verify)
+instead of a closed vendor service, so this is not gated on any waitlist and
+settles on Base L2 / USDC we already control. Pure protocol codec, same
+zero-dep / zero-I/O / zero-custody invariants as the rest of the lib:
+
+- `payment-requirements` / `challenge` — build the 402 body (price via
+  `parse-usdc`, micros on the wire).
+- `encode-header` / `decode-header` — portable UTF-8 base64 for the
+  `X-PAYMENT` / `X-PAYMENT-RESPONSE` envelopes (JSON stays with the host to
+  keep zero-dep).
+- `payload-errors` / `acceptable?` — pure validation of a decoded payment
+  against the requirements (scheme / network / recipient / amount / expiry) for
+  both the canonical `exact` EIP-3009 scheme and a `transaction` (tx-hash)
+  scheme that maps 1:1 onto the existing treasury/verify path.
+- `authorize` — the verify-before-serve decision (the x402 form of `entitle`):
+  serve only when the host confirms on-chain settlement, else hold at 402.
+
+Design: superproject ADR-2607093100.
+
 ## Consumers
 
 - `jk-luxury/club-shinshi` — creator subscription / PPV / tip (the
