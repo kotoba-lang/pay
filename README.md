@@ -83,6 +83,28 @@ zero-dep / zero-I/O / zero-custody invariants as the rest of the lib:
 
 Design: superproject ADR-2607093100.
 
+## Facilitator gateway — `pay.facilitator`
+
+`pay.facilitator` is the pure brain of a central x402 **facilitator/gateway**
+service (deployed as `gftdcojp/nexus-x402`, superproject ADR-2607093300). Where
+`pay.x402` is the wire codec, this is the multi-seller **rules engine** + the
+standard x402 facilitator decisions:
+
+- **Rules engine** — a seller registry (`{:seller :method :path-prefix :usd
+  :pay-to :chain :scheme}`, first structural match wins). Many sellers
+  (shinshi / murakumo / kotobase, each with its OWN treasury) share one
+  facilitator that holds no keys: `match-rule`, `rule->requirements`.
+- **`verify`** — the x402 `/verify` decision (`{:isValid :invalidReason
+  :payer}`): pure shape/economic checks + the host's on-chain verdict.
+- **`settle`** — the x402 `/settle` decision (reuses `authorize`).
+- **`gate`** — the end-to-end gateway decision (`:pass` / `:challenge` /
+  `:serve` / `:hold`), transport-independent.
+- **`discovery`** — the `/.well-known/x402` facilitator discovery document.
+
+All pure — the host (nexus-x402) injects on-chain verify/settle via
+kotoba-lang/treasury + base-l2. This lets sellers delegate verification to one
+edge-hosted facilitator instead of each vendoring the whole gate.
+
 ## Consumers
 
 - `jk-luxury/club-shinshi` — creator subscription / PPV / tip (the
