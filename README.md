@@ -105,6 +105,65 @@ All pure — the host (nexus-x402) injects on-chain verify/settle via
 kotoba-lang/treasury + base-l2. This lets sellers delegate verification to one
 edge-hosted facilitator instead of each vendoring the whole gate.
 
+### Opening the registry to third parties
+
+Everything above already worked with one seller: the operator. Admitting
+*other people's* sellers is the change that turns the operator from the
+counterparty on every flow into the market those flows run through — the
+structural move a system-dynamics pass over
+[`kotoba-lang/dynamics`](https://github.com/kotoba-lang/dynamics)' archetype
+catalog ranked third of six for the three-sphere economy
+(com-junkawasaki/root adr-ledger seq 66, 2026-07-25), grounded in Visa earning
+$40B on **$17T of other people's transactions** and in ERC-20's real leverage
+being that every later token project became free demand surface for Ethereum.
+
+Two things had to be true first, and one of them was a live hole:
+
+- **`match-rule` treats `:seller nil` as "matches ANY seller".** Fine with one
+  tenant. An authorization hole the moment anyone else can add a rule —
+  nexus-x402 routes `/gateway/<seller>/<path>`, so a single wildcard rule would
+  collect payment across every seller's namespace. `open-registry-rule-errors`
+  rejects it (plus reserved/malformed seller ids, relative prefixes, and the
+  namespace-swallowing `"/"`). `rule-errors` is unchanged — existing
+  single-tenant callers are unaffected.
+- **Shadowed rules.** First-match-wins is intended semantics, but a seller who
+  registers a specific price behind a general one gets silently underpaid.
+  `shadowed-rules` reports it at registration instead of at reconciliation.
+
+`register-seller` is **all-or-nothing** (a half-registered seller is worse than
+an unregistered one), refuses registering on someone else's behalf, refuses a
+prefix already covered by a *different* seller's rule, and appends at the end
+so **existing sellers always keep priority over newcomers** — registration can
+never re-route traffic that already had a home.
+
+```clojure
+(fac/register-seller rules "acme"
+  [{:method "GET" :path-prefix "/acme/reports/" :usd "0.25" :pay-to "0xAcmeTreasury"}])
+;; => {:admitted? true :rules [...] :warnings []}
+```
+
+### The protocol fee is recorded, not collected
+
+`protocol-fee` computes 500 bps (5% — the same cut ADR-2607995000's membrane
+table already applies to fiat/USDC→credits, so the economy has *one* fee
+number) in exact integer USDC micros, floored, on `:maxAmountRequired`. An
+unparseable amount yields `nil`, never `0`.
+
+`:collectible?` is **always false**, and the reason rides in-band rather than
+in a comment: this facilitator holds zero keys by design, payment goes buyer →
+the seller's own treasury directly, and an x402 requirement carries exactly one
+`payTo`. Splitting a payment atomically would need a splitter contract that is
+not deployed, and deploying one that custodies third-party money is a separate,
+higher-stakes decision. So this is the **record** layer only — the same
+record / custody / governance separation ADR-2607995000 §2 already applies to
+the treasury. Anything that reads a non-nil `:amount-micros` as revenue
+*received* is wrong.
+
+`settlement-record` carries the seller on every row, which makes **acceptance
+density** — how many distinct sellers have ever settled — a ledger query rather
+than an assertion. That count is **1** today, and the growth analysis named it
+the binding constraint on the whole economy.
+
 ## Consumers
 
 - `jk-luxury/club-shinshi` — creator subscription / PPV / tip (the
