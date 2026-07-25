@@ -124,15 +124,112 @@
     (and (string? seller) (not (re-matches #"[a-z0-9][a-z0-9-]{0,62}" seller)))
     (conj :facilitator/malformed-seller)))
 
+;; ── credits as a second payment option (ADR-2607995000 amend, seq 73) ──
+;;
+;; A seller may price a resource in USDC, in murakumo credits, or in both. The
+;; membrane amend that made this legal adds exactly one row -- credits ->
+;; third-party seller, credits-denominated -- and changes nothing else:
+;; credits->fiat/USDC stays forbidden in both directions, as does credits<->EN.
+;; Transferability is not redeemability, so §1's structural non-speculation
+;; proof survives: a credit paid to a seller still cannot leave the economy.
+;;
+;; Why it is worth the code: a non-redeemable unit's value is bounded by the
+;; number of distinct things it buys, and before this the only acceptor was the
+;; operator's own inference fleet -- an acceptance density of exactly 1, which
+;; the system-dynamics pass (com-junkawasaki/root adr-ledger seq 66) named as
+;; the binding constraint on the whole credits sphere.
+;;
+;; This layer stays pure and custody-free for credits exactly as it is for
+;; USDC. It decides WHAT is owed; whether the payer's credits balance covers it
+;; is a ledger question the host answers (murakumo.infer.credits/balances +
+;; ledger-violations) and injects, the same shape as `onchain-verdict`.
+
+(def credits-network
+  "The `network` string a credits-denominated requirement carries. Not a chain:
+  credits settle in murakumo's append-only ledger, never on-chain, and the
+  distinct value is what stops a caller routing one to an EVM verifier."
+  "murakumo")
+
+(def credits-scheme "credits")
+
+(defn credits-requirements
+  "A credits-denominated payment option, in the same x402 requirement shape as
+  `pay.x402/payment-requirements` so a 402 body can offer it inside `accepts`
+  alongside the USDC option and an x402 client needs no new parser.
+
+  `payTo` is the seller's CREDITS ACCOUNT NAME, not an address -- credits have
+  no chain and no key custody. `maxAmountRequired` is a credits amount as a
+  decimal string, matching x402's bigint-safe string convention."
+  [{:keys [credits-to credits resource description max-timeout-seconds]
+    :or {max-timeout-seconds 60}}]
+  {:scheme credits-scheme
+   :network credits-network
+   :maxAmountRequired (str credits)
+   :resource resource
+   :description (or description "")
+   :mimeType "application/json"
+   :payTo credits-to
+   :maxTimeoutSeconds max-timeout-seconds
+   :asset {:symbol "CREDITS"
+           :network credits-network
+           :redeemable false
+           :note "murakumo memory x time credits: labor-issued, transferable
+                  between holders, NON-redeemable for fiat/USDC/EN by design
+                  (ADR-2607995000 §1 membrane rules). Receiving these is not
+                  receiving money and must not be accounted as such."}})
+
+(defn payment-option-errors
+  "Errors for a rule's PRICING, [] when usable. A rule must offer at least one
+  complete payment option; each option it does offer must be complete.
+
+  Deliberately not folded into `rule-errors`: that fn predates credits, is
+  still correct for a USDC-only rule, and existing single-tenant callers depend
+  on its exact output. This is the open-registry rule."
+  [{:keys [usd pay-to credits credits-to]}]
+  (let [usdc? (or usd pay-to)
+        cr?   (or credits credits-to)]
+    (cond-> []
+      (and (not usdc?) (not cr?))          (conj :facilitator/no-payment-option)
+      (and usdc? (not (string? usd)))      (conj :facilitator/missing-usd)
+      (and usdc? (not (string? pay-to)))   (conj :facilitator/missing-pay-to)
+      (and cr? (not (string? credits)))    (conj :facilitator/missing-credits-price)
+      (and cr? (not (string? credits-to))) (conj :facilitator/missing-credits-to))))
+
+(defn rule->accepts
+  "Every payment option a matched rule offers, as an x402 `accepts` vector.
+  USDC first when present (it is the option that settles outside this economy,
+  so a buyer with no credits account is never stuck reading past it)."
+  [rule resource]
+  (cond-> []
+    (:usd rule) (conj (rule->requirements rule resource))
+    (:credits rule) (conj (credits-requirements (assoc rule :resource resource)))))
+
+(defn accepts-credits?
+  "Does this rule take credits? Answering it from the registry is what makes
+  acceptance density -- the count of sellers who accept credits -- a query
+  rather than an assertion."
+  [rule]
+  (boolean (and (:credits rule) (:credits-to rule))))
+
+(defn credits-accepting-sellers
+  "Distinct sellers in `rules` that accept credits. 1 today (the operator's own
+  fleet, once it registers a credits price); the growth analysis named that 1
+  as the binding constraint on the credits sphere."
+  [rules]
+  (into #{} (comp (filter accepts-credits?) (keep :seller)) rules))
+
 (defn open-registry-rule-errors
   "Validation errors for a rule submitted by a THIRD PARTY, [] when usable.
 
-  Strictly stronger than `rule-errors`: everything that function checks, plus
-  the constraints that only matter once the registry is open. Existing
-  single-tenant callers keep using `rule-errors` and are unaffected."
+  Covers the constraints that only matter once the registry is open, plus
+  `payment-option-errors` (which supersedes `rule-errors`'s USDC-only pricing
+  checks so that a credits-only seller is expressible). `rule-errors` itself is
+  unchanged and existing single-tenant callers are unaffected."
   [{:keys [seller path-prefix] :as rule}]
-  (into (rule-errors rule)
+  (into (into [] (payment-option-errors rule))
         (cond-> (seller-id-errors seller)
+          (not (string? path-prefix))
+          (conj :facilitator/missing-path-prefix)
           ;; the hijack vector: a nil seller matches every namespace
           (nil? seller)
           (conj :facilitator/wildcard-seller-forbidden)
@@ -321,14 +418,62 @@
     {:decision :hold :status 402 :reason kw :requirements r}"
   [rules {:keys [path] :as req} payment onchain-verdict now-epoch]
   (if-let [rule (match-rule rules req)]
-    (let [reqs (rule->requirements rule path)]
+    (let [reqs (rule->requirements rule path)
+          accepts (rule->accepts rule path)]
       (if (nil? payment)
-        {:decision :challenge :status 402 :requirements reqs}
+        ;; :requirements stays the USDC option so pre-credits callers are
+        ;; byte-for-byte unaffected; :accepts carries every option the rule
+        ;; offers, which is what x402's own `accepts` array is for.
+        (cond-> {:decision :challenge :status 402 :requirements reqs}
+          (seq accepts) (assoc :accepts accepts))
         (let [d (settle payment reqs onchain-verdict now-epoch)]
           (if (:authorized? d)
             {:decision :serve :settlement (:settlement d) :requirements reqs}
             {:decision :hold :status 402 :reason (:reason d) :requirements reqs}))))
     {:decision :pass}))
+
+(defn credits-gate
+  "The credits-denominated analogue of `gate`'s paid branch, for a payment whose
+  scheme is `credits`.
+
+  Kept SEPARATE from `gate` rather than branching inside it, on purpose: `gate`
+  routes to `pay.x402/authorize`, whose entire job is validating an on-chain
+  payload (asset, network, payTo address, EIP-3009 authorization). A credits
+  payment has none of those and must never be handed to that validator, because
+  a validator that has to accept two unrelated payload shapes is one refactor
+  away from accepting an on-chain payload with a credits verdict attached.
+
+  `credits-verdict` is host-injected, exactly like `onchain-verdict`:
+    {:sufficient? bool :payer \"account\" :balance n :reason kw}
+  The host computes it from murakumo.infer.credits (`balances` +
+  `ledger-violations`) -- this layer holds no ledger and no keys, and it
+  deliberately CANNOT decide affordability on its own.
+
+  Returns {:decision :serve :transfer {...}} with the ledger event the host
+  should append, or {:decision :hold :status 402 :reason kw}. Note it returns
+  the transfer to be RECORDED; this fn does not and cannot move anything."
+  [rule {:keys [path]} {:keys [payer amount] :as _payment} credits-verdict]
+  (let [reqs (credits-requirements (assoc rule :resource path))
+        owed (:maxAmountRequired reqs)]
+    (cond
+      (not (accepts-credits? rule))
+      {:decision :hold :status 402 :reason :facilitator/seller-does-not-accept-credits
+       :requirements reqs}
+
+      (not= (str amount) (str owed))
+      {:decision :hold :status 402 :reason :facilitator/credits-amount-mismatch
+       :requirements reqs :owed owed :offered (str amount)}
+
+      (not (:sufficient? credits-verdict))
+      {:decision :hold :status 402
+       :reason (or (:reason credits-verdict) :facilitator/insufficient-credits)
+       :requirements reqs}
+
+      :else
+      {:decision :serve
+       :requirements reqs
+       :transfer {:from payer :to (:credits-to rule) :credits owed
+                  :for (:resource reqs)}})))
 
 ;; ── facilitator discovery (/.well-known/x402) ───────────────────────
 
