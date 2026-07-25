@@ -164,6 +164,46 @@ density** — how many distinct sellers have ever settled — a ledger query rat
 than an assertion. That count is **1** today, and the growth analysis named it
 the binding constraint on the whole economy.
 
+### Sellers can price in credits, not only USDC
+
+`credits-requirements` / `rule->accepts` / `credits-gate` let a seller price a
+resource in **murakumo credits**, in USDC, or in both. A 402 then carries both
+options in x402's own `accepts` array — USDC first, so a buyer with no credits
+account is never stuck reading past the option they cannot use. The pre-credits
+`:requirements` key is unchanged, so callers that never look at `:accepts`
+behave exactly as before.
+
+This required amending an accepted ADR, which is worth stating plainly rather
+than burying: **ADR-2607995000's membrane table is exhaustive** ("ここに無い流れ
+は禁止") and holder-to-holder credits payment was not in it, so it was forbidden.
+`adr-ledger` seq 73 adds exactly one row — credits → third-party seller,
+credits-denominated — and changes nothing else. Still forbidden, untouched:
+credits→fiat/USDC (both directions), credits↔EN, EN↔USDC.
+
+**Transferability is not redeemability.** A credit paid to a seller still cannot
+leave the economy, so §1's structural non-speculation proof (neither internal
+unit is redeemable, therefore neither can be an investment) survives intact. The
+requirement payload carries `:redeemable false` in-band so a seller integrating
+against it cannot book received credits as money without ignoring a field that
+says not to.
+
+`credits-gate` is deliberately **separate from `gate`** rather than a branch
+inside it: `gate` routes to `pay.x402/authorize`, whose whole job is validating
+an on-chain payload (asset, network, `payTo` address, EIP-3009 authorization). A
+credits payment has none of those, and a validator forced to accept two
+unrelated payload shapes is one refactor away from accepting an on-chain payload
+with a credits verdict attached.
+
+It also **cannot decide affordability**. `credits-verdict` is host-injected
+exactly like `onchain-verdict`, computed from
+`murakumo.infer.credits/balances` + `ledger-violations`; a missing verdict is
+treated as insufficient, never as sufficient. And `:serve` returns a
+`:transfer` **to be recorded**, not one performed — this layer holds no ledger
+and moves nothing, the same custody-free stance it takes for USDC.
+
+`credits-accepting-sellers` counts distinct sellers who accept credits from the
+registry. **0 today.**
+
 ## Consumers
 
 - `jk-luxury/club-shinshi` — creator subscription / PPV / tip (the

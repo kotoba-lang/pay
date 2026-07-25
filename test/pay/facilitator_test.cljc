@@ -96,14 +96,17 @@
         (is (some #{:facilitator/wildcard-seller-forbidden}
                   (fac/open-registry-rule-errors (first wildcard))))))))
 
-(deftest open-registry-rule-errors-is-strictly-stronger-than-rule-errors
-  (testing "every rule-errors failure is still reported"
+(deftest open-registry-rule-errors-covers-pricing-and-path
+  (testing "a rule with no pricing at all is refused as having no payment option
+            (superseding rule-errors' USDC-only checks, so a credits-only seller
+            is expressible -- see payment-option-errors)"
     (let [bad {:seller "acme"}]
-      (is (= #{:facilitator/missing-path-prefix :facilitator/missing-usd
-               :facilitator/missing-pay-to}
-             (set (filter #{:facilitator/missing-path-prefix :facilitator/missing-usd
-                            :facilitator/missing-pay-to}
-                          (fac/open-registry-rule-errors bad)))))))
+      (is (some #{:facilitator/no-payment-option} (fac/open-registry-rule-errors bad)))
+      (is (some #{:facilitator/missing-path-prefix} (fac/open-registry-rule-errors bad)))))
+  (testing "rule-errors itself is untouched for existing single-tenant callers"
+    (is (= #{:facilitator/missing-path-prefix :facilitator/missing-usd
+             :facilitator/missing-pay-to}
+           (set (fac/rule-errors {:seller "acme"})))))
   (testing "plus the constraints that only matter once the registry is open"
     (let [base {:usd "1.00" :pay-to "0xAcme" :path-prefix "/api/"}]
       (is (some #{:facilitator/reserved-seller}
@@ -252,3 +255,116 @@
       (is (= "0xAcmeTreasury" (get-in challenge [:requirements :payTo]))
           "the 402 tells the buyer to pay the SELLER, not the facilitator")
       (is (= 250000 (:gross-micros (fac/protocol-fee (:requirements challenge))))))))
+
+;; ── credits as a second payment option (ADR-2607995000 amend, seq 73) ────
+
+(def credits-rule
+  {:seller "acme" :method "GET" :path-prefix "/acme/reports/"
+   :usd "0.25" :pay-to "0xAcmeTreasury"
+   :credits "250" :credits-to "acme-corp"})
+
+(deftest payment-option-errors-requires-one-complete-option
+  (testing "no pricing at all"
+    (is (= [:facilitator/no-payment-option] (fac/payment-option-errors {}))))
+  (testing "a USDC-only rule is complete without any credits fields"
+    (is (empty? (fac/payment-option-errors {:usd "1.00" :pay-to "0xA"}))))
+  (testing "a CREDITS-ONLY rule is complete without any USDC fields -- this is
+            the case rule-errors could not express"
+    (is (empty? (fac/payment-option-errors {:credits "100" :credits-to "acme-corp"})))
+    (is (empty? (fac/open-registry-rule-errors
+                 {:seller "acme" :path-prefix "/acme/" :credits "100" :credits-to "acme-corp"}))))
+  (testing "a half-specified option is refused rather than silently ignored"
+    (is (= [:facilitator/missing-pay-to] (fac/payment-option-errors {:usd "1.00"})))
+    (is (= [:facilitator/missing-usd] (fac/payment-option-errors {:pay-to "0xA"})))
+    (is (= [:facilitator/missing-credits-to] (fac/payment-option-errors {:credits "10"})))
+    (is (= [:facilitator/missing-credits-price] (fac/payment-option-errors {:credits-to "acme-corp"})))))
+
+(deftest credits-requirements-never-look-like-money
+  (let [r (fac/credits-requirements (assoc credits-rule :resource "/acme/reports/q1"))]
+    (is (= "credits" (:scheme r)))
+    (is (= "murakumo" (:network r)) "not a chain -- a credits requirement must
+                                     never be routable to an EVM verifier")
+    (is (= "acme-corp" (:payTo r)) "an ACCOUNT NAME, not an address: credits have
+                                    no chain and no key custody")
+    (is (= "250" (:maxAmountRequired r)))
+    (is (false? (get-in r [:asset :redeemable]))
+        "the non-redeemability is in the payload, so a seller integrating against
+         this cannot book received credits as money without ignoring a field that
+         says not to")
+    (is (= "CREDITS" (get-in r [:asset :symbol])))))
+
+(deftest a-402-offers-both-options
+  (let [{:keys [rules]} (fac/register-seller rules "acme" [credits-rule])
+        req {:seller "acme" :method "GET" :path "/acme/reports/q1"}
+        ch (fac/gate rules req nil nil now)]
+    (is (= :challenge (:decision ch)))
+    (is (= 2 (count (:accepts ch))))
+    (is (= ["transaction" "credits"] (mapv :scheme (:accepts ch)))
+        "USDC first -- a buyer with no credits account is never stuck reading past
+         the option they cannot use")
+    (testing "the pre-credits :requirements key is unchanged, so existing callers
+              that never look at :accepts behave byte-for-byte as before"
+      (is (= "0xAcmeTreasury" (get-in ch [:requirements :payTo])))
+      (is (= "transaction" (get-in ch [:requirements :scheme]))
+          "rule->requirements' own default, unchanged"))))
+
+(deftest a-usdc-only-seller-gets-no-credits-option
+  (let [req {:seller "shinshi" :method "GET" :path "/premium/x"}
+        ch (fac/gate rules req nil nil now)]
+    (is (= 1 (count (:accepts ch))))
+    (is (= ["transaction"] (mapv :scheme (:accepts ch))))
+    (is (false? (fac/accepts-credits? (first rules))))))
+
+(deftest acceptance-density-is-a-registry-query
+  (testing "the number the growth analysis named the binding constraint must be
+            countable, not asserted"
+    (is (empty? (fac/credits-accepting-sellers rules)) "0 sellers accept credits today")
+    (let [{:keys [rules]} (fac/register-seller rules "acme" [credits-rule])]
+      (is (= #{"acme"} (fac/credits-accepting-sellers rules))))))
+
+(deftest credits-gate-cannot-decide-affordability-on-its-own
+  (testing "insufficient balance holds -- and the verdict comes from the host's
+            ledger, never from this layer"
+    (let [r (fac/credits-gate credits-rule {:path "/acme/reports/q1"}
+                              {:payer "buyer" :amount "250"}
+                              {:sufficient? false :reason :credits/overdraft})]
+      (is (= :hold (:decision r)))
+      (is (= 402 (:status r)))
+      (is (= :credits/overdraft (:reason r)))
+      (is (nil? (:transfer r)) "nothing to record when nothing was authorized")))
+  (testing "a missing verdict is treated as insufficient, never as sufficient"
+    (is (= :hold (:decision (fac/credits-gate credits-rule {:path "/x"}
+                                              {:payer "b" :amount "250"} nil))))))
+
+(deftest credits-gate-refuses-underpayment-and-wrong-sellers
+  (testing "paying less than owed is refused, and the numbers are reported"
+    (let [r (fac/credits-gate credits-rule {:path "/acme/reports/q1"}
+                              {:payer "buyer" :amount "10"}
+                              {:sufficient? true})]
+      (is (= :hold (:decision r)))
+      (is (= :facilitator/credits-amount-mismatch (:reason r)))
+      (is (= "250" (:owed r)))
+      (is (= "10" (:offered r)))))
+  (testing "overpaying is refused too -- an exact-amount scheme that silently
+            accepted more would make the ledger disagree with the price"
+    (is (= :facilitator/credits-amount-mismatch
+           (:reason (fac/credits-gate credits-rule {:path "/x"}
+                                      {:payer "buyer" :amount "9999"}
+                                      {:sufficient? true})))))
+  (testing "a seller who never opted into credits cannot be paid in them"
+    (is (= :facilitator/seller-does-not-accept-credits
+           (:reason (fac/credits-gate (dissoc credits-rule :credits :credits-to)
+                                      {:path "/x"} {:payer "b" :amount "250"}
+                                      {:sufficient? true}))))))
+
+(deftest credits-gate-returns-a-transfer-to-record-not-a-transfer-performed
+  (let [r (fac/credits-gate credits-rule {:path "/acme/reports/q1"}
+                            {:payer "buyer" :amount "250"}
+                            {:sufficient? true :payer "buyer"})]
+    (is (= :serve (:decision r)))
+    (is (= {:from "buyer" :to "acme-corp" :credits "250"
+            :for "/acme/reports/q1"}
+           (:transfer r))
+        "the shape murakumo.infer.credits/transfer consumes -- this layer holds
+         no ledger and moves nothing")
+    (is (nil? (:settlement r)) "there is no on-chain settlement for a credits payment")))
