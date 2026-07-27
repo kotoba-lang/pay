@@ -30,6 +30,40 @@
     (doseq [s ["{\"x402Version\":1}" "日本語 price ¥" "0xdeadBEEF"]]
       (is (= s (x402/decode-header (x402/encode-header s)))))))
 
+(def v2-reqs
+  (x402/v2-payment-requirements {:pay-to "0xTreasurySafe" :usd "0.01"}))
+
+(def v2-payment
+  {:x402Version 2
+   :resource {:url "https://x402.nexus/gateway/murakumo-memory/api/v1/infer-memory"
+              :description "infer+memory" :mimeType "application/json"}
+   :accepted v2-reqs
+   :payload {:signature "0xsig"
+             :authorization {:from "0xPayer" :to "0xTreasurySafe"
+                             :value "10000" :validAfter "0"
+                             :validBefore (str (+ now 60)) :nonce "0x01"}}
+   :extensions {}})
+
+(deftest v2-official-core-shape-and-validation
+  (let [required (x402/v2-payment-required
+                  {:resource (:resource v2-payment) :accepts [v2-reqs]})]
+    (is (= 2 (:x402Version required)))
+    (is (= "eip155:8453" (:network v2-reqs)))
+    (is (= "10000" (:amount v2-reqs)))
+    (is (nil? (:maxAmountRequired v2-reqs)))
+    (is (= [] (x402/v2-payload-errors v2-payment v2-reqs now))))
+  (testing "v2 exact rejects both underpayment and overpayment"
+    (doseq [amount ["9999" "10001"]]
+      (is (some #{:x402/amount-not-exact}
+                (x402/v2-payload-errors
+                 (assoc-in v2-payment [:payload :authorization :value] amount)
+                 v2-reqs now)))))
+  (testing "accepted requirements cannot be changed by the client"
+    (is (some #{:x402/accepted-requirements-mismatch}
+              (x402/v2-payload-errors
+               (assoc-in v2-payment [:accepted :payTo] "0xAttacker")
+               v2-reqs now)))))
+
 (def exact-payment
   {:x402Version 1 :scheme "exact" :network "base"
    :payload {:signature "0xsig"

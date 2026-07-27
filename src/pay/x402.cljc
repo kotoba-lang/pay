@@ -31,6 +31,8 @@
             [pay.core :as pay]))
 
 (def x402-version 1)
+(def x402-v2-version 2)
+(def base-caip2 "eip155:8453")
 
 ;; USDC on Base L2 (Coinbase Bridged), 6 decimals — same asset kotoba-lang/
 ;; treasury's `base` chain uses; the default settlement asset.
@@ -92,6 +94,62 @@
    {:x402Version x402-version
     :accepts (if (sequential? requirements) (vec requirements) [requirements])
     :error error}))
+
+(defn v2-payment-requirements
+  "Official x402 v2 PaymentRequirements shape. Unlike v1, resource metadata is
+  separated into PaymentRequired.resource, `amount` replaces
+  `maxAmountRequired`, and EVM networks use CAIP-2 identifiers. This function
+  constructs schema only; it does not claim the host can settle EIP-3009."
+  [{:keys [pay-to usd max-timeout-seconds network asset extra]
+    :or {network base-caip2 max-timeout-seconds 60}}]
+  {:scheme "exact"
+   :network network
+   :amount (str (pay/parse-usdc (str usd)))
+   :asset (or asset usdc-base)
+   :payTo pay-to
+   :maxTimeoutSeconds max-timeout-seconds
+   :extra (merge {:name "USD Coin" :version "2"
+                  :assetTransferMethod "eip3009"}
+                 extra)})
+
+(defn v2-payment-required
+  "Official v2 PaymentRequired object prior to JSON/base64 HTTP encoding."
+  [{:keys [resource accepts extensions error]}]
+  {:x402Version x402-v2-version
+   :error (or error "PAYMENT-SIGNATURE header is required")
+   :resource resource
+   :accepts (vec accepts)
+   :extensions (or extensions {})})
+
+(def ^:private v2-requirement-keys
+  [:scheme :network :amount :asset :payTo :maxTimeoutSeconds :extra])
+
+(defn v2-payload-errors
+  "Validate the version-independent core and exact/EIP-3009 economic fields of
+  a v2 PaymentPayload. Signature recovery, balance, simulation and broadcast
+  remain host/facilitator responsibilities. Exact v2 requires equality, not
+  merely >=, and the client's `accepted` requirement must echo the server's."
+  [{:keys [x402Version accepted payload]} requirements now-epoch-seconds]
+  (let [auth (:authorization payload)]
+    (cond-> []
+      (not= x402Version x402-v2-version) (conj :x402/version-mismatch)
+      (not= (select-keys accepted v2-requirement-keys)
+            (select-keys requirements v2-requirement-keys))
+      (conj :x402/accepted-requirements-mismatch)
+      (not= "exact" (:scheme requirements)) (conj :x402/scheme-mismatch)
+      (not (str/starts-with? (or (:network requirements) "") "eip155:"))
+      (conj :x402/network-not-caip2)
+      (not= (lc (:to auth)) (lc (:payTo requirements)))
+      (conj :x402/wrong-recipient)
+      (not= (parse-int (:value auth)) (parse-int (:amount requirements)))
+      (conj :x402/amount-not-exact)
+      (and (:validBefore auth)
+           (<= (parse-int (:validBefore auth)) now-epoch-seconds))
+      (conj :x402/authorization-expired)
+      (and (:validAfter auth)
+           (> (parse-int (:validAfter auth)) now-epoch-seconds))
+      (conj :x402/authorization-not-yet-valid)
+      (not (string? (:signature payload))) (conj :x402/missing-signature))))
 
 ;; ─── payment payload validation (facilitator side, pure) ────────────
 ;; A decoded X-PAYMENT payload:
