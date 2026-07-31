@@ -368,3 +368,86 @@
         "the shape murakumo.infer.credits/transfer consumes -- this layer holds
          no ledger and moves nothing")
     (is (nil? (:settlement r)) "there is no on-chain settlement for a credits payment")))
+
+;; ── receivables / invoice (ADR-2607320500 §3) ───────────────────────
+
+(def ^:private req-1c {:maxAmountRequired "10000" :payTo "0xTREASURY" :resource "/x402/v1/messages"})
+
+(defn- rec
+  ([seller at] (rec seller at req-1c))
+  ([seller at requirements]
+   (fac/settlement-record {:seller seller :settlement {:ok true} :requirements requirements
+                           :payer "0xBUYER" :now-epoch at})))
+
+(deftest invoice-bills-what-was-recorded-not-the-current-rate
+  (testing "a record settled at 500 bps bills 500 bps even if the default changes"
+    (let [old (assoc-in (rec "murakumo" 100) [:fee :bps] 500)
+          old (assoc-in old [:fee :amount-micros] 500)   ; 5% of 10000
+          new (assoc-in (rec "murakumo" 200) [:fee :bps] 2000)
+          new (assoc-in new [:fee :amount-micros] 2000)  ; 20% of 10000
+          inv (fac/invoice {:seller "murakumo" :records [old new] :issued-at 300})]
+      (is (= 2500 (:amount-micros inv)) "500 + 2000, each at its own recorded rate")
+      (is (= [500 2000] (mapv :bps (:lines inv))))
+      (is (= 20000 (:gross-micros inv))))))
+
+(deftest invoice-never-bills-an-uncomputable-fee-as-zero
+  (testing "an unparseable price yields :amount-micros nil, which must be reported not zeroed"
+    (let [bad (rec "murakumo" 100 {:maxAmountRequired "not-a-number" :resource "/x"})
+          good (rec "murakumo" 200)
+          inv (fac/invoice {:seller "murakumo" :records [bad good] :issued-at 300})]
+      (is (nil? (get-in bad [:fee :amount-micros])) "precondition: protocol-fee refuses to guess")
+      (is (= 1 (count (:lines inv))) "only the computable one is billed")
+      (is (= 1 (count (:unbillable inv))) "the other is surfaced, not dropped")
+      (is (= 500 (:amount-micros inv))))))
+
+(deftest invoice-does-not-bill-another-sellers-settlements
+  (let [inv (fac/invoice {:seller "murakumo"
+                          :records [(rec "murakumo" 100) (rec "someone-else" 110)]
+                          :issued-at 300})]
+    (is (= 1 (count (:lines inv))))
+    (is (= 500 (:amount-micros inv)))
+    (testing "the foreign record is reported as data, not thrown"
+      (is (= ["someone-else"] (:foreign inv))))))
+
+(deftest invoice-is-labelled-as-a-receivable-not-a-settlement
+  (let [inv (fac/invoice {:seller "murakumo" :records [(rec "murakumo" 100)] :issued-at 300})]
+    (testing "in-band so a reader cannot mistake it for an on-chain split"
+      (is (= :invoice (:basis inv)))
+      (is (= :none (:custody inv)))
+      (is (= "USDC" (:currency inv))))
+    (testing "and the underlying fee record still says it is not on-chain collectible"
+      (is (false? (:collectible? (:fee (rec "murakumo" 100)))))))
+  (testing "an empty period is a zero invoice, not an error"
+    (let [inv (fac/invoice {:seller "murakumo" :records [] :issued-at 1})]
+      (is (= 0 (:amount-micros inv)))
+      (is (= [] (:lines inv))))))
+
+(deftest outstanding-never-goes-negative
+  (let [inv (fac/invoice {:seller "murakumo" :records [(rec "murakumo" 100)] :issued-at 300})]
+    (is (= {:owed-micros 500 :overpaid-micros 0} (fac/outstanding-micros inv 0)))
+    (is (= {:owed-micros 200 :overpaid-micros 0} (fac/outstanding-micros inv 300)))
+    (is (= {:owed-micros 0 :overpaid-micros 0} (fac/outstanding-micros inv 500)))
+    (testing "an overpayment is reported separately — a negative receivable would
+              fold into a total as a credit and cancel real debt elsewhere"
+      (is (= {:owed-micros 0 :overpaid-micros 100} (fac/outstanding-micros inv 600))))))
+
+(deftest delinquency-requires-an-explicit-due-date
+  (let [base (fac/invoice {:seller "murakumo" :records [(rec "murakumo" 100)] :issued-at 300})
+        dated (assoc base :due-at 1000)]
+    (testing "no due date is NOT overdue — 'never billed' must not read as 'late'"
+      (is (false? (fac/delinquent? base 0 999999))))
+    (is (false? (fac/delinquent? dated 0 999)) "not yet due")
+    (is (true? (fac/delinquent? dated 0 1001)) "due and unpaid")
+    (is (false? (fac/delinquent? dated 500 1001)) "due but paid in full")
+    (is (true? (fac/delinquent? dated 100 1001)) "partly paid is still delinquent")))
+
+(deftest suspension-withholds-service-and-names-only-the-delinquent
+  (let [mk (fn [s] (assoc (fac/invoice {:seller s :records [(rec s 100)] :issued-at 300})
+                          :due-at 1000))
+        invs [(mk "a") (mk "b") (mk "c")]]
+    (is (= #{"a" "c"} (fac/suspension-set invs {"b" 500} 1001))
+        "b paid; a and c did not")
+    (testing "a seller absent from the payment map is treated as having paid nothing"
+      (is (= #{"a" "b" "c"} (fac/suspension-set invs {} 1001))))
+    (testing "before the due date nobody is suspended"
+      (is (= #{} (fac/suspension-set invs {} 999))))))

@@ -486,3 +486,114 @@
    :schemes ["transaction" "exact"]
    :networks ["base"]
    :asset {:symbol "USDC" :address x402/usdc-base :network "base" :decimals 6}})
+
+;; ── receivables: the protocol fee as an INVOICE, not an on-chain split ──
+;;
+;; com-junkawasaki/root ADR-2607320500 §3. Owner requirement (2026-07-31):
+;; "資産預かりたくないけど、手数料は欲しい" — do not custody assets, but do
+;; collect the fee. Those two are only simultaneously satisfiable one way.
+;;
+;; `protocol-fee` reports :collectible? false because THIS facilitator cannot
+;; take a cut on-chain: it holds no keys and an x402 requirement carries a
+;; single `payTo`. Taking a cut atomically needs a splitter contract, and
+;; deploying a contract that holds a third party's money is the single decision
+;; that was also blocking witness bonds (ADR-2607319800).
+;;
+;; So the fee is collected the ordinary way instead: the seller receives 100%
+;; into their own treasury, and the operator BILLS them. Nothing is ever held
+;; on anyone else's behalf, so the money-transmission surface never opens. The
+;; cost is credit risk in place of regulatory risk — an ordinary B2B receivable.
+;;
+;; The non-custodial enforcement lever is service, not funds: a delinquent
+;; seller is suspended from the registry (losing discovery/routing), never
+;; deprived of money the facilitator does not hold. See `suspension-set`.
+
+(defn- record-fee-micros
+  "Fee owed for one settlement record, or nil when it was never computable.
+  Reads the fee RECORDED ON THE RECORD -- never re-applies a current rate."
+  [rec]
+  (get-in rec [:fee :amount-micros]))
+
+(defn invoice
+  "Aggregate settled records for ONE seller into a receivable (USDC micros).
+
+  Bills what the records SAY, never what the current rate is. Each record
+  carries the `:bps` in force when it settled, so changing
+  `default-protocol-fee-bps` later cannot retroactively re-price a past
+  period -- an invoice is a statement about history.
+
+  Records whose fee was never computable (`protocol-fee` returns
+  :amount-micros nil for an unparseable price, deliberately not 0) are
+  reported under :unbillable and EXCLUDED from the total. Billing them as
+  zero would silently under-invoice; dropping them silently would lose them.
+
+  Records belonging to another seller are not billed and are reported under
+  :foreign -- returned as data rather than thrown, matching the
+  `rule-errors`/`ledger-violations` discipline in this codebase.
+
+  → {:seller :period :lines :gross-micros :amount-micros :currency
+     :issued-at :due-at :basis :custody :unbillable :foreign}"
+  [{:keys [seller records issued-at due-epoch]}]
+  (let [foreign (into [] (remove #(= seller (:seller %))) records)
+        mine (into [] (filter #(= seller (:seller %))) records)
+        billable (into [] (filter record-fee-micros) mine)
+        unbillable (into [] (remove record-fee-micros) mine)]
+    {:seller seller
+     :lines (mapv (fn [r]
+                    {:at (:at r)
+                     :resource (:resource r)
+                     :gross-micros (:amount-micros r)
+                     :bps (get-in r [:fee :bps])
+                     :fee-micros (record-fee-micros r)})
+                  billable)
+     :gross-micros (reduce + 0 (keep :amount-micros billable))
+     :amount-micros (reduce + 0 (map record-fee-micros billable))
+     :currency "USDC"
+     :issued-at issued-at
+     :due-at due-epoch
+     ;; in-band so a reader cannot mistake this for an on-chain settlement
+     :basis :invoice
+     :custody :none
+     :unbillable (mapv #(select-keys % [:at :resource :amount-micros]) unbillable)
+     :foreign (mapv :seller foreign)}))
+
+(defn outstanding-micros
+  "What is still owed on `inv` after `paid-micros`. Never negative: an
+  overpayment is reported as 0 owed plus :overpaid-micros, because a negative
+  receivable would fold into a total as a credit against OTHER invoices and
+  quietly cancel real debt."
+  [inv paid-micros]
+  (let [owed (:amount-micros inv)
+        paid (or paid-micros 0)]
+    {:owed-micros (max 0 (- owed paid))
+     :overpaid-micros (max 0 (- paid owed))}))
+
+(defn delinquent?
+  "Is `inv` past due and still (partly) unpaid at `now-epoch`?
+  Requires an explicit :due-at -- an invoice with no due date is NOT
+  delinquent, because 'never billed a due date' must not read as 'overdue'."
+  [inv paid-micros now-epoch]
+  (boolean
+   (and (:due-at inv)
+        (> now-epoch (:due-at inv))
+        (pos? (:owed-micros (outstanding-micros inv paid-micros))))))
+
+(defn suspension-set
+  "Sellers to suspend from the registry — the NON-CUSTODIAL enforcement lever.
+
+  Suspension withholds SERVICE (discovery and routing through this
+  facilitator), never funds: this facilitator holds no keys and could not
+  seize anything if it wanted to. That is the point — the leverage is
+  reachability to buyers, not custody of their money.
+
+  `paid-by-seller` maps seller -> micros received. A seller absent from it is
+  treated as having paid nothing.
+
+  Returns a set; the registry operation itself (removing rules) belongs to the
+  host, exactly as `settle`'s :serve is a record of what SHOULD happen rather
+  than something this layer performs."
+  [invoices paid-by-seller now-epoch]
+  (into #{}
+        (comp (filter #(delinquent? % (get paid-by-seller (:seller %) 0) now-epoch))
+              (map :seller))
+        invoices))
