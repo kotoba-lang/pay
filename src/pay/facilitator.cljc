@@ -597,3 +597,76 @@
         (comp (filter #(delinquent? % (get paid-by-seller (:seller %) 0) now-epoch))
               (map :seller))
         invoices))
+
+;; ── replay protection: one settlement, bounded service ──────────────
+;;
+;; An x402 `transaction`-scheme payment is proof that a transfer happened. It
+;; is NOT proof that the transfer has not already been redeemed: the payload
+;; carries a txHash, the chain says that tx is real forever, and nothing in
+;; verification is stateful. So without a spent-record, one payment buys
+;; unlimited requests. Measured on murakumo.cloud 2026-07-31: the same txHash
+;; was presented twice and served twice.
+;;
+;; The obvious fix -- mark the txHash "spent" on first use -- is wrong here,
+;; because it CONFISCATES overpayment. A buyer who sent $0.10 against a $0.01
+;; price is owed ten requests, not one; burning the tx on first use would keep
+;; $0.09 of their money for nothing. x402 has no change output, so the seller
+;; is the only party who can honour the remainder.
+;;
+;; So the spent-record is an AMOUNT, not a flag: each served request consumes
+;; `price` micros of the settled total, and the payment is exhausted when the
+;; next request would exceed it. A flag is the degenerate case where price ==
+;; paid, and this generalises it without a separate code path.
+
+(defn spend-verdict
+  "May this already-verified settlement pay for ONE more request?
+
+     paid-micros     what the transaction actually transferred (from the
+                     verified on-chain record -- NOT from the payload, which
+                     the payer controls)
+     consumed-micros what has already been served against it (0 / nil = never
+                     seen, i.e. first use)
+     price-micros    the price of THIS request
+
+   → {:allow? bool :reason kw :consumed-micros n :remaining-micros n}
+
+   `:consumed-micros` is what the caller should PERSIST. On denial it is
+   returned unchanged: a refused request must never consume budget, or a buyer
+   could be drained by requests they were never served.
+
+   Integer micros throughout -- the unit the chain settles in. Non-integer or
+   negative inputs deny rather than coerce, because a silently coerced amount
+   is how a rounding bug becomes free inference."
+  [{:keys [paid-micros consumed-micros price-micros]}]
+  (let [paid paid-micros
+        consumed (or consumed-micros 0)
+        price price-micros
+        ints? (every? #(and (number? %) (not (neg? %)) (== % (Math/floor %)))
+                      [paid consumed price])]
+    (cond
+      (not ints?)
+      {:allow? false :reason :malformed-amounts
+       :consumed-micros (if (and (number? consumed) (not (neg? consumed))) consumed 0)
+       :remaining-micros 0}
+
+      ;; a zero-priced request would consume nothing and could be replayed
+      ;; forever; that is a pricing bug, not a payment the buyer authorised
+      (zero? price)
+      {:allow? false :reason :zero-price
+       :consumed-micros consumed :remaining-micros (max 0 (- paid consumed))}
+
+      (> (+ consumed price) paid)
+      {:allow? false :reason :payment-exhausted
+       :consumed-micros consumed :remaining-micros (max 0 (- paid consumed))}
+
+      :else
+      {:allow? true :reason :within-settled-amount
+       :consumed-micros (+ consumed price)
+       :remaining-micros (- paid (+ consumed price))})))
+
+(defn spend-key
+  "Storage key for a settlement's consumed-amount record. Namespaced by chain
+  and network so the same hash on two chains is two records -- tx hashes are
+  not globally unique across chains."
+  [{:keys [network tx-hash]}]
+  (str "x402:spent:" (or network "unknown") ":" (some-> tx-hash str/lower-case)))
