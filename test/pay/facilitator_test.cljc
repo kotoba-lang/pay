@@ -451,3 +451,72 @@
       (is (= #{"a" "b" "c"} (fac/suspension-set invs {} 1001))))
     (testing "before the due date nobody is suspended"
       (is (= #{} (fac/suspension-set invs {} 999))))))
+
+;; ── replay protection (spend-verdict) ───────────────────────────────
+
+(deftest overpayment-buys-multiple-requests-not-one
+  (testing "a $0.10 payment at $0.01 buys TEN requests — burning the tx on
+            first use would confiscate $0.09 the buyer is owed"
+    (let [paid 100000 price 10000]
+      (loop [consumed 0 n 0]
+        (let [v (fac/spend-verdict {:paid-micros paid :consumed-micros consumed
+                                    :price-micros price})]
+          (if (:allow? v)
+            (recur (:consumed-micros v) (inc n))
+            (do (is (= 10 n) "exactly ten requests fit in the settled amount")
+                (is (= :payment-exhausted (:reason v)))
+                (is (= 0 (:remaining-micros v))))))))))
+
+(deftest first-use-is-allowed-and-exact-payment-buys-exactly-one
+  (testing "nil consumed = never seen"
+    (let [v (fac/spend-verdict {:paid-micros 10000 :consumed-micros nil :price-micros 10000})]
+      (is (:allow? v))
+      (is (= 10000 (:consumed-micros v)))
+      (is (= 0 (:remaining-micros v)))))
+  (testing "and the second presentation of that same payment is refused —
+            this is the replay the whole namespace exists to stop"
+    (let [v (fac/spend-verdict {:paid-micros 10000 :consumed-micros 10000 :price-micros 10000})]
+      (is (false? (:allow? v)))
+      (is (= :payment-exhausted (:reason v))))))
+
+(deftest a-refused-request-never-consumes-budget
+  (testing "denial returns consumed UNCHANGED — otherwise a buyer could be
+            drained by requests they were never served"
+    (doseq [[paid consumed price] [[10000 10000 10000]   ; exhausted
+                                   [10000 5000 9000]     ; would overrun
+                                   [10000 0 0]]]         ; zero price
+      (let [v (fac/spend-verdict {:paid-micros paid :consumed-micros consumed
+                                  :price-micros price})]
+        (is (false? (:allow? v)))
+        (is (= consumed (:consumed-micros v))
+            "consumed must not move when the request is refused")))))
+
+(deftest partial-remainder-smaller-than-price-is-exhausted-not-free
+  (testing "$0.015 paid at $0.01: one request, and the leftover $0.005 does
+            NOT buy a second one"
+    (let [v1 (fac/spend-verdict {:paid-micros 15000 :consumed-micros 0 :price-micros 10000})]
+      (is (:allow? v1))
+      (is (= 5000 (:remaining-micros v1)))
+      (let [v2 (fac/spend-verdict {:paid-micros 15000 :consumed-micros (:consumed-micros v1)
+                                   :price-micros 10000})]
+        (is (false? (:allow? v2)))
+        (is (= :payment-exhausted (:reason v2)))
+        (is (= 5000 (:remaining-micros v2)) "the remainder is still owed, just not spendable here")))))
+
+(deftest malformed-amounts-deny-rather-than-coerce
+  (testing "a silently coerced amount is how a rounding bug becomes free inference"
+    (doseq [bad [{:paid-micros 10000.5 :consumed-micros 0 :price-micros 10000}
+                 {:paid-micros -1 :consumed-micros 0 :price-micros 10000}
+                 {:paid-micros nil :consumed-micros 0 :price-micros 10000}
+                 {:paid-micros 10000 :consumed-micros 0 :price-micros "10000"}]]
+      (let [v (fac/spend-verdict bad)]
+        (is (false? (:allow? v)))
+        (is (= :malformed-amounts (:reason v)))))))
+
+(deftest spend-key-is-namespaced-by-network
+  (testing "tx hashes are not globally unique across chains"
+    (is (not= (fac/spend-key {:network "base" :tx-hash "0xAbC"})
+              (fac/spend-key {:network "ethereum" :tx-hash "0xAbC"}))))
+  (testing "and the hash is case-normalised so 0xABC and 0xabc are one record"
+    (is (= (fac/spend-key {:network "base" :tx-hash "0xABC"})
+           (fac/spend-key {:network "base" :tx-hash "0xabc"})))))
