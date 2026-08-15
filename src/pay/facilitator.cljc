@@ -415,17 +415,40 @@
     {:decision :pass}                                  ; no rule → not gated
     {:decision :challenge :status 402 :requirements r} ; needs payment
     {:decision :serve :settlement s :requirements r}   ; paid & verified
-    {:decision :hold :status 402 :reason kw :requirements r}"
+    {:decision :hold :status 402 :reason kw :requirements r}
+
+  A rule with NO USDC price (credits-only, which `payment-option-errors` and
+  `register-seller` both admit) has no `:requirements` — only `:accepts`. It
+  used to have neither: `rule->requirements` prices through
+  `pay.core/parse-usdc`, which THROWS on a missing amount, so this fn threw on
+  the first unpaid request to any credits-only resource and the gateway
+  answered 500. `rule->accepts` had the `(:usd rule)` guard from the day it was
+  written; this one did not, and nothing exercised the combination because the
+  only registry in production was USDC-only."
   [rules {:keys [path] :as req} payment onchain-verdict now-epoch]
   (if-let [rule (match-rule rules req)]
-    (let [reqs (rule->requirements rule path)
+    (let [reqs (when (:usd rule) (rule->requirements rule path))
           accepts (rule->accepts rule path)]
-      (if (nil? payment)
+      (cond
+        (nil? payment)
         ;; :requirements stays the USDC option so pre-credits callers are
         ;; byte-for-byte unaffected; :accepts carries every option the rule
         ;; offers, which is what x402's own `accepts` array is for.
-        (cond-> {:decision :challenge :status 402 :requirements reqs}
+        (cond-> {:decision :challenge :status 402}
+          reqs (assoc :requirements reqs)
           (seq accepts) (assoc :accepts accepts))
+
+        ;; An on-chain payment presented against a rule that never advertised
+        ;; an on-chain price. Refusing is the only honest answer: there is no
+        ;; payTo to have paid, so there is nothing to verify the payload
+        ;; against, and inventing requirements here would mean checking a real
+        ;; transfer against a price nobody published.
+        (nil? reqs)
+        (cond-> {:decision :hold :status 402
+                 :reason :facilitator/seller-does-not-accept-onchain-payment}
+          (seq accepts) (assoc :accepts accepts))
+
+        :else
         (let [d (settle payment reqs onchain-verdict now-epoch)]
           (if (:authorized? d)
             {:decision :serve :settlement (:settlement d) :requirements reqs}
