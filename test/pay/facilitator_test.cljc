@@ -520,3 +520,59 @@
   (testing "and the hash is case-normalised so 0xABC and 0xabc are one record"
     (is (= (fac/spend-key {:network "base" :tx-hash "0xABC"})
            (fac/spend-key {:network "base" :tx-hash "0xabc"})))))
+
+;; ── gate on a credits-only rule ─────────────────────────────────────────────
+;;
+;; `payment-option-errors` and `register-seller` have admitted credits-only
+;; rules since the membrane amend, so the registry could hold one — but `gate`
+;; priced every matched rule through `rule->requirements` unconditionally, and
+;; that calls `pay.core/parse-usdc`, which THROWS on a missing amount. The
+;; first unpaid request to such a resource took the gateway down with it.
+;;
+;; `rule->accepts` had the `(:usd rule)` guard from the day it was written.
+;; The two functions were added in the same commit and only one of them
+;; considered the case the commit existed to enable.
+
+(def credits-only-rule
+  {:seller "kotobase" :method "GET" :path-prefix "/x402/ipfs/"
+   :credits "0.1" :credits-to "kotobase"})
+
+(deftest gate-does-not-throw-on-a-credits-only-rule
+  (let [g (fac/gate [credits-only-rule]
+                    {:seller "kotobase" :method "GET" :path "/x402/ipfs/bafy"}
+                    nil nil 1783000000)]
+    (is (= :challenge (:decision g)))
+    (testing "there is no USDC option, so there is no :requirements — not a
+              zero-priced one, which would advertise the resource as free"
+      (is (nil? (:requirements g))))
+    (testing "and the credits option is offered"
+      (is (= 1 (count (:accepts g))))
+      (is (= "credits" (:scheme (first (:accepts g)))))
+      (is (= "0.1" (:maxAmountRequired (first (:accepts g)))))
+      (is (= "kotobase" (:payTo (first (:accepts g))))))))
+
+(deftest an-onchain-payment-against-a-credits-only-rule-is-refused
+  (testing "there is no payTo it could have paid, so there is nothing to verify
+            the payload against; inventing requirements would mean checking a
+            real transfer against a price nobody published"
+    (let [g (fac/gate [credits-only-rule]
+                      {:seller "kotobase" :method "GET" :path "/x402/ipfs/bafy"}
+                      {:x402Version 1 :scheme "transaction" :network "base"
+                       :payload {:txHash "0xabc" :from "0xAgent"}}
+                      {:included true :tx "0xabc" :payer "0xAgent"}
+                      1783000000)]
+      (is (= :hold (:decision g)))
+      (is (= :facilitator/seller-does-not-accept-onchain-payment (:reason g)))
+      (testing "and the refusal still tells the buyer what IS accepted"
+        (is (= "credits" (:scheme (first (:accepts g)))))))))
+
+(deftest a-usdc-rule-keeps-its-exact-previous-shape
+  (testing "the regression this change must not cause"
+    (let [rule {:seller "shinshi" :method "GET" :path-prefix "/premium/"
+                :usd "0.50" :pay-to "0xShinshi" :chain "base"}
+          g (fac/gate [rule] {:seller "shinshi" :method "GET" :path "/premium/x"}
+                      nil nil 1783000000)]
+      (is (= :challenge (:decision g)))
+      (is (= "500000" (:maxAmountRequired (:requirements g))))
+      (is (= (:requirements g) (first (:accepts g))))
+      (is (nil? (:reason g))))))
