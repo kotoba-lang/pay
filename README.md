@@ -35,17 +35,44 @@ its donation-only rail on its own side of the substrate axis.
 - **`PayRail` protocol** — the injected seam for every on-chain effect,
   with `unprovisioned-rail` as the honest default (every operation HOLDs
   with `:pay/unprovisioned-capability`; never fake a settlement).
+- **`pay.rail.base-l2`** — the FIRST REAL RAIL. One-shot USDC transfer on
+  Base L2 as an ERC-4337 UserOperation, via
+  [kotoba-lang/base-l2](https://github.com/kotoba-lang/base-l2). It
+  provisions exactly one of the six methods:
+
+  | method | |
+  |---|---|
+  | `-pay!` | **real** — `transfer(address,uint256)` through the caller's bundle |
+  | `-pay-stream!` / `-pay-stream-stop!` | HOLD — no Superfluid adapter exists |
+  | `-split-distribute!` | HOLD — no 0xSplits adapter exists |
+  | `-escrow-open!` / `-escrow-release!` | HOLD — no Safe-escrow adapter exists |
+
+  The five HOLD **byte-identically to `unprovisioned-rail`**, asserted by a
+  test, so nothing downstream can tell a not-yet-built rail from a
+  not-yet-built method. A rail that quietly answered all six would be worse
+  than the unprovisioned one, because a HOLD is visible and a fabricated
+  receipt is not.
+
+  Refusals are holds, not exceptions — `:pay/unresolvable-payee`,
+  `:pay/invalid-amount`, `:pay/settlement-reverted` — so a caller cannot
+  swallow one in a `try` and proceed. An unresolvable payee never falls back
+  to `:to` itself, a zero address, or a default: USDC sent to a guessed
+  address is not recoverable. Transport failures (RPC down, bundler
+  unreachable) are *not* payment decisions and propagate.
 
 ## What it deliberately does NOT do
 
-- No chain RPC, no PDS writes, no HTTP — hosts back `PayRail` with real
-  adapters: [kotoba-lang/base-l2](https://github.com/kotoba-lang/base-l2)
-  (JSON-RPC + ERC-4337 sponsored writes),
+- No chain RPC, no PDS writes, no HTTP — *the core does none of these*, and
+  that is still true: `pay.rail.base-l2` is pure over an injected bundler and
+  an injected transport, so it moves no bytes itself either. Hosts back
+  `PayRail` with real adapters:
+  [kotoba-lang/base-l2](https://github.com/kotoba-lang/base-l2)
+  (JSON-RPC + ERC-4337 sponsored writes — **now wired, for `-pay!`**),
   [kotoba-lang/treasury](https://github.com/kotoba-lang/treasury)
   (on-chain USDC verification + append-only ledger),
   [kotoba-lang/wallet](https://github.com/kotoba-lang/wallet)
   (non-custodial signing). Superfluid / 0xSplits / Safe-escrow adapters are
-  follow-ups; until then those rail methods HOLD honestly.
+  still follow-ups; until then those rail methods HOLD honestly.
 - No private keys. Signing stays on the payer's device (passkey smart
   wallet or non-custodial wallet) — a platform-held signing key is
   prohibited by design, same as the original SDK's rule.
