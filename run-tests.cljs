@@ -10,11 +10,17 @@
   JVM and red under nbb for reasons production does not have (SCI deftype
   behaviour), so `.cljc` alone is not grounds.
 
-      npx nbb --classpath src:test run-tests.cljs"
+      npx nbb --classpath $(clojure -A:test -Spath) run-tests.cljs
+
+  The classpath comes from `clojure -Spath` rather than a literal `src:test`
+  because `pay.rail.base-l2` needs kotoba-lang/base-l2 (and, transitively,
+  eth-crypto) on it. `src:test` alone silently omits the rail suite's
+  dependency and the run dies at require time."
   (:require [cljs.test :as t]
             [pay.core-test]
             [pay.facilitator-test]
-            [pay.x402-test]))
+            [pay.x402-test]
+            [pay.rail.base-l2-test]))
 
 (defmethod t/report [::t/default :end-run-tests] [m]
   (when-not (t/successful? m)

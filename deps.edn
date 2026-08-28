@@ -1,4 +1,12 @@
 {:paths ["src"]
+ ;; pay's core stays pure and dependency-free; this is for `pay.rail.base-l2`,
+ ;; the ERC-4337 adapter the README has always named as the rail's intended
+ ;; backing. base-l2 performs no I/O of its own either -- it is pure over an
+ ;; injected transport and an injected bundler -- so "zero network I/O, zero
+ ;; key custody" still holds.
+ :deps {io.github.kotoba-lang/base-l2
+        {:git/url "https://github.com/kotoba-lang/base-l2"
+         :git/sha "6f741ec4b2df4112db2c7bd23c5327a8ee17faa9"}}
  :aliases {:test {:extra-paths ["test"]
                   :extra-deps {io.github.cognitect-labs/test-runner
                                {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
