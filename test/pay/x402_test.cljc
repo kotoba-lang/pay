@@ -64,6 +64,32 @@
                (assoc-in v2-payment [:accepted :payTo] "0xAttacker")
                v2-reqs now)))))
 
+(deftest v2-agent-spend-policy
+  (let [policy {:allowed-networks #{"eip155:8453"}
+                :allowed-assets #{x402/usdc-base}
+                :allowed-pay-tos #{"0xtreasurysafe"}
+                :max-per-call-micros 10000
+                :spent-micros 20000
+                :max-total-micros 30000}
+        selected (x402/select-v2-requirement
+                  {:accepts [v2-reqs]} policy)]
+    (is (:ok? selected))
+    (is (= 30000 (:next-spent-micros selected)))
+    (is (= :x402/no-policy-compliant-requirement
+           (:reason (x402/select-v2-requirement
+                     {:accepts [v2-reqs]}
+                     (assoc policy :max-total-micros 29999)))))
+    (is (some #{:x402/pay-to-not-allowed}
+              (x402/v2-spend-policy-errors
+               v2-reqs (assoc policy :allowed-pay-tos #{"0xattacker"}))))))
+
+(deftest v2-settlement-shape
+  (is (= {:success true :transaction "0xtx" :network "eip155:8453"
+          :payer "0xpayer"}
+         (x402/v2-settlement-response
+          {:success true :transaction "0xtx" :network "eip155:8453"
+           :payer "0xpayer"}))))
+
 (def exact-payment
   {:x402Version 1 :scheme "exact" :network "base"
    :payload {:signature "0xsig"
