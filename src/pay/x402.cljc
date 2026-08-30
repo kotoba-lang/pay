@@ -34,6 +34,12 @@
 (def x402-v2-version 2)
 (def base-caip2 "eip155:8453")
 
+(def v1-payment-header "X-PAYMENT")
+(def v1-payment-response-header "X-PAYMENT-RESPONSE")
+(def v2-payment-required-header "PAYMENT-REQUIRED")
+(def v2-payment-signature-header "PAYMENT-SIGNATURE")
+(def v2-payment-response-header "PAYMENT-RESPONSE")
+
 ;; USDC on Base L2 (Coinbase Bridged), 6 decimals — same asset kotoba-lang/
 ;; treasury's `base` chain uses; the default settlement asset.
 (def usdc-base "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913")
@@ -150,6 +156,61 @@
            (> (parse-int (:validAfter auth)) now-epoch-seconds))
       (conj :x402/authorization-not-yet-valid)
       (not (string? (:signature payload))) (conj :x402/missing-signature))))
+
+(defn v2-settlement-response
+  "Official v2 SettlementResponse returned in PAYMENT-RESPONSE. `network` is
+  the CAIP-2 network from the accepted requirement."
+  [{:keys [success transaction network payer error-reason]}]
+  (cond-> {:success (boolean success)
+           :transaction (or transaction "")
+           :network network
+           :payer payer}
+    error-reason (assoc :errorReason error-reason)))
+
+(defn v2-spend-policy-errors
+  "Pure agent-side policy check for one selected v2 requirement. The caller is
+  responsible for atomically persisting cumulative budget before signing; this
+  function makes the decision deterministic and wallet-independent.
+
+  Policy keys: :allowed-networks, :allowed-assets, :allowed-pay-tos (sets),
+  :max-per-call-micros, :spent-micros, and :max-total-micros. Missing allowlists
+  mean unrestricted; missing numeric limits mean no limit."
+  [requirements {:keys [allowed-networks allowed-assets allowed-pay-tos
+                        max-per-call-micros spent-micros max-total-micros]}]
+  (let [amount (parse-int (:amount requirements))
+        spent (or spent-micros 0)
+        allowed? (fn [xs value normalize]
+                   (or (nil? xs)
+                       (contains? (set (map normalize xs)) (normalize value))))]
+    (cond-> []
+      (not (pos? amount)) (conj :x402/non-positive-amount)
+      (not (allowed? allowed-networks (:network requirements) str))
+      (conj :x402/network-not-allowed)
+      (not (allowed? allowed-assets (:asset requirements) lc))
+      (conj :x402/asset-not-allowed)
+      (not (allowed? allowed-pay-tos (:payTo requirements) lc))
+      (conj :x402/pay-to-not-allowed)
+      (and max-per-call-micros (> amount max-per-call-micros))
+      (conj :x402/per-call-limit-exceeded)
+      (and max-total-micros (> (+ spent amount) max-total-micros))
+      (conj :x402/total-limit-exceeded))))
+
+(defn select-v2-requirement
+  "Return the first requirement admitted by `policy`, plus the next cumulative
+  spend value. Returns a denial map when no advertised option is acceptable."
+  [payment-required policy]
+  (let [evaluated (map (fn [r] [r (v2-spend-policy-errors r policy)])
+                       (:accepts payment-required))]
+    (if-let [[requirements _] (some (fn [[r errors]]
+                                      (when (empty? errors) [r errors]))
+                                    evaluated)]
+      {:ok? true
+       :requirements requirements
+       :next-spent-micros (+ (or (:spent-micros policy) 0)
+                               (parse-int (:amount requirements)))}
+      {:ok? false
+       :reason :x402/no-policy-compliant-requirement
+       :errors (vec (mapcat second evaluated))})))
 
 ;; ─── payment payload validation (facilitator side, pure) ────────────
 ;; A decoded X-PAYMENT payload:
