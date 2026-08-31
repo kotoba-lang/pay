@@ -17,7 +17,8 @@
 (require '[cljs.test :as t]
          '[pay.core-test]
          '[pay.facilitator-test]
-         '[pay.x402-test])
+         '[pay.x402-test]
+         '[pay.x402-buyer-test])
 
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
   (when-not (t/successful? m) (set! (.-exitCode js/process) 1)))

@@ -39,7 +39,8 @@
   A buyer that refuses everything must be able to say which constraint bit.
   Collapsing `over-cap` into a generic `not-acceptable` is how a spend limit
   becomes indistinguishable from a typo in an asset address."
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str]
+            [pay.x402 :as x402]))
 
 (def ^:private amount-keys
   "x402 v1 says `maxAmountRequired`; v2 says `amount`. Both are base units as a
@@ -78,30 +79,75 @@
   (let [a (or (:accepts challenge) (get challenge "accepts"))]
     (when (sequential? a) (vec a))))
 
+(defn asset-id
+  "The comparable identity of an offer's asset, as a string, or nil.
+
+  An on-chain offer quotes its asset as a contract address string. A credits
+  offer quotes a MAP (`{:symbol \"CREDITS\" :network \"murakumo\" :redeemable
+  false ...}`), because a ledger unit has no address to name.
+
+  Both shapes have to collapse to one before anything compares them. Left as
+  they arrive, a credits offer breaks the buyer twice over: `contains?` on a
+  set of address strings never matches a map, so an allowlist that names
+  CREDITS still refuses it; and sorting a map against a string throws
+  `ClassCastException` on the JVM while comparing arbitrarily under
+  ClojureScript. Measured 2026-08-31 against x402.nexus's own credits
+  requirement shape (`pay.facilitator/credits-requirements`)."
+  [asset]
+  (cond
+    (string? asset) asset
+    (map? asset) (some-> (or (:symbol asset) (get asset "symbol")) str)
+    :else nil))
+
+(defn rail
+  "`[network asset]` — the pair whose amounts are commensurable.
+
+  Two offers may be compared on price only if they are on the same rail. This
+  is the whole reason the pair exists as a value: 10000 base units of USDC is
+  $0.01 and 10000 credits is $100, and both arrive as the string \"10000\" in
+  the same field of the same challenge."
+  [{:keys [network asset]}]
+  [network asset])
+
 (defn- normalize [req]
   {:scheme (or (:scheme req) (get req "scheme"))
    :network (or (:network req) (get req "network"))
-   :asset (or (:asset req) (get req "asset"))
+   :asset (asset-id (or (:asset req) (get req "asset")))
    :pay-to (or (:payTo req) (get req "payTo"))
    :amount (amount-of req)
    :resource (or (:resource req) (get req "resource"))
    :raw req})
 
+(defn- cap-for
+  "The cap that applies to this offer's rail.
+
+  `:caps` is keyed by rail and wins when it names one, because a cap is a
+  quantity in a unit and the unit is the rail. `:max-amount` remains the
+  single-number form for a policy facing one rail; it is not per-rail, so a
+  policy that leaves it to cover two rails is capping one of them in the
+  other's units. `plan` refuses to CHOOSE between rails without `:prefer`, so
+  the only way that number is ever applied to a rail is that the operator
+  named that rail first."
+  [offer {:keys [caps max-amount]}]
+  (let [r (rail offer)]
+    (if (and caps (contains? caps r)) (get caps r) max-amount)))
+
 (defn- rejection
   "Why this one offer cannot be taken, or nil when it can. Order is fixed so a
   reader can predict which reason surfaces when several apply."
-  [{:keys [scheme network asset pay-to amount]}
-   {:keys [schemes networks assets pay-tos max-amount]}]
-  (cond
-    (blank? scheme) :buyer/offer-has-no-scheme
-    (not (allowed? schemes scheme)) :buyer/scheme-not-allowed
-    (blank? network) :buyer/offer-has-no-network
-    (not (allowed? networks network)) :buyer/network-not-allowed
-    (not (allowed? assets asset)) :buyer/asset-not-allowed
-    (not (allowed? pay-tos pay-to)) :buyer/payee-not-allowed
-    (nil? amount) :buyer/unreadable-amount
-    (and max-amount (> amount max-amount)) :buyer/over-cap
-    :else nil))
+  [{:keys [scheme network asset pay-to amount] :as offer}
+   {:keys [schemes networks assets pay-tos] :as policy}]
+  (let [max-amount (cap-for offer policy)]
+    (cond
+      (blank? scheme) :buyer/offer-has-no-scheme
+      (not (allowed? schemes scheme)) :buyer/scheme-not-allowed
+      (blank? network) :buyer/offer-has-no-network
+      (not (allowed? networks network)) :buyer/network-not-allowed
+      (not (allowed? assets asset)) :buyer/asset-not-allowed
+      (not (allowed? pay-tos pay-to)) :buyer/payee-not-allowed
+      (nil? amount) :buyer/unreadable-amount
+      (and max-amount (> amount max-amount)) :buyer/over-cap
+      :else nil)))
 
 (defn plan
   "-> `{:pay {...} :rejected [...]}` or `{:refuse reason :rejected [...]}`.
@@ -114,7 +160,17 @@
        :schemes  #{\"exact\"}
        :networks #{\"base\"}
        :assets   #{\"0x8335…\"}     ; nil = unconstrained, #{} = nothing allowed
-       :pay-tos  #{\"0xA003…\"}}
+       :pay-tos  #{\"0xA003…\"}
+       :caps     {[\"murakumo\" \"CREDITS\"] 1}   ; a cap per rail, in that rail's
+                                             ; own units. Wins over :max-amount
+       :prefer   [[\"murakumo\" \"CREDITS\"]      ; which rail to take when a seller
+                  [\"base\" \"0x8335…\"]]}        ; offers more than one
+
+  A seller may advertise the same resource on more than one rail — USDC on Base
+  and murakumo credits, say. Their amounts are not comparable, so when offers
+  from two rails survive the policy this REFUSES with
+  `:buyer/incomparable-rails` unless `:prefer` names one. Silence is not a
+  preference, for the same reason silence is not a spend authorisation.
 
   `:pay` carries the chosen offer and the amount, which is what the host then
   signs. `:rejected` always lists every offer that was not taken with its
@@ -142,10 +198,59 @@
         (if (empty? ok)
           {:refuse (or (:reason (first reasons)) :buyer/nothing-acceptable)
            :rejected reasons}
-          ;; Cheapest, then a stable tie-break. Never "first that parsed":
-          ;; the order of `accepts` is the seller's choice, not the buyer's.
-          (let [chosen (first (sort-by (juxt :amount :network :asset :scheme) ok))]
-            {:pay (dissoc chosen :rejected-because)
-             :rejected reasons}))))))
+          (let [rails (distinct (map rail ok))
+                ;; Cheapest is only a question WITHIN a rail. Across rails the
+                ;; amounts are quantities of different things, so the buyer does
+                ;; not get to decide -- the policy states an order, or nothing
+                ;; is paid. Guessing here is how paying $0.01 in credits gets
+                ;; recorded as having chosen the cheaper of two offers over
+                ;; $0.001 in USDC.
+                chosen-rail (if (= 1 (count rails))
+                              (first rails)
+                              (first (filter (set rails) (:prefer policy))))]
+            (if (nil? chosen-rail)
+              {:refuse :buyer/incomparable-rails
+               :rails (vec rails)
+               :rejected reasons}
+              ;; Cheapest, then a stable tie-break. Never "first that parsed":
+              ;; the order of `accepts` is the seller's choice, not the buyer's.
+              (let [on-rail (filter #(= chosen-rail (rail %)) ok)
+                    chosen (first (sort-by (juxt :amount :scheme) on-rail))]
+                {:pay (dissoc chosen :rejected-because)
+                 :rejected reasons}))))))))
+
+(defn credits-payment
+  "The `X-PAYMENT` payload for a chosen CREDITS offer, or `{:refuse reason}`.
+
+  Credits settle in murakumo's append-only ledger, so what authorises the
+  payment is not a signature over a chain transaction but a CACAO whose SIWE
+  `resources` name this exact transfer (`murakumo:transfer?to=<seller>&credits=
+  <amount>`) and whose nonce is single-use. This function does not mint it and
+  holds no key: the caller supplies the CACAO, and this assembles the envelope.
+
+  It REFUSES an offer that is not on a credits rail. The seller's scheme is what
+  says how a payment settles, and an envelope built for the wrong one is a
+  payment that will be validated by a validator expecting other fields --
+  `pay.facilitator/credits-gate` exists precisely so those two never share a
+  code path."
+  [{:keys [scheme network amount pay-to]} {:keys [payer cacao]}]
+  (cond
+    (not= "credits" scheme) {:refuse :buyer/not-a-credits-offer}
+    (blank? payer) {:refuse :buyer/no-payer-account}
+    (blank? cacao) {:refuse :buyer/no-authorization}
+    (nil? amount) {:refuse :buyer/unreadable-amount}
+    :else {:x402Version 1
+           :scheme "credits"
+           :network network
+           :payload {:payer payer :amount amount :to pay-to :cacao cacao}}))
+
+(defn payment-header
+  "A payment envelope as the `X-PAYMENT` header value, or nil for a refusal.
+
+  nil rather than the refusal encoded: a header built out of a refusal is a
+  request that looks paid."
+  [payment]
+  (when-not (:refuse payment)
+    (x402/encode-header payment)))
 
 (defn payable? [r] (some? (:pay r)))

@@ -20,6 +20,7 @@
             [pay.core-test]
             [pay.facilitator-test]
             [pay.x402-test]
+            [pay.x402-buyer-test]
             [pay.rail.base-l2-test]))
 
 (defmethod t/report [::t/default :end-run-tests] [m]
