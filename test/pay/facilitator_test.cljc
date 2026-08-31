@@ -74,11 +74,40 @@
 
 (deftest discovery-doc
   (let [d (fac/discovery {:verify-url "https://nexus.gftd.ai/verify"
-                          :settle-url "https://nexus.gftd.ai/settle"})]
+                          :settle-url "https://nexus.gftd.ai/settle"
+                          :schemes ["transaction"]
+                          :networks ["base" "base-sepolia"]
+                          :testnets ["base-sepolia"]})]
     (is (= 1 (:x402Version d)))
     (is (= "https://nexus.gftd.ai/verify" (get-in d [:facilitator :verify])))
     (is (= x402/usdc-base (get-in d [:asset :address])))
-    (is (some #{"transaction"} (:schemes d)))))
+    (is (= ["transaction"] (:schemes d)))
+    (is (= ["base" "base-sepolia"] (:networks d)))
+    (is (= ["base-sepolia"] (:testnets d))
+        "testnet であることを名前から推測させない")))
+
+(deftest a-discovery-document-cannot-invent-what-the-host-can-do
+  (testing "literal で持っていた `[\"transaction\" \"exact\"]` / `[\"base\"]` は
+            2026-08-31 に両方向へずれていた —— 鍵を持たない facilitator が
+            exact を名乗り、検証できる base-sepolia を名乗っていなかった。
+            builder は自分が見たことのない deployment について
+            正しくも間違ってもいられない"
+    (doseq [[label opts] [["no schemes" {:networks ["base"]}]
+                          ["no networks" {:schemes ["transaction"]}]
+                          ["empty schemes" {:schemes [] :networks ["base"]}]
+                          ["empty networks" {:schemes ["transaction"] :networks []}]
+                          ["neither" {}]]]
+      (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                   (fac/discovery (merge {:verify-url "https://x/verify"
+                                          :settle-url "https://x/settle"}
+                                         opts)))
+          (str label " must not produce a document")))))
+
+(deftest testnets-are-omitted-rather-than-announced-empty
+  (let [d (fac/discovery {:verify-url "https://x/verify" :settle-url "https://x/settle"
+                          :schemes ["transaction"] :networks ["base"]})]
+    (is (not (contains? d :testnets))
+        "空の :testnets は『testnet が無い』とも『測っていない』とも読める")))
 
 ;; ── opening the registry to third-party sellers (2026-07-25) ─────────────
 
