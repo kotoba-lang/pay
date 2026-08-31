@@ -285,3 +285,73 @@
     (x402/encode-header (json-encode payment))))
 
 (defn payable? [r] (some? (:pay r)))
+
+;; ── where a policy comes from ───────────────────────────────────────────────
+
+(def policy-vocabulary
+  "The facts that say what an agent may spend, and how each one narrows.
+
+  `:min` takes the smaller of two, `:intersect` keeps only what both allow. Both
+  are narrowing operations, and that is the whole design: a later block in an
+  attenuated token can restrict what an earlier one granted and can never
+  widen it.
+
+  A predicate absent from a block says nothing -- it is not a grant of
+  everything, it is silence, and silence from one block cannot loosen a bound
+  another block set."
+  {'max-amount {:key :max-amount :narrow :min}
+   'network    {:key :networks   :narrow :intersect}
+   'asset      {:key :assets     :narrow :intersect}
+   'pay-to     {:key :pay-tos    :narrow :intersect}
+   'scheme     {:key :schemes    :narrow :intersect}})
+
+(defn- block-policy
+  "One block's facts -> the partial policy it declares, or nil when it declares
+  none. A block that says nothing about spending is not a block that permits
+  everything."
+  [facts]
+  (let [decls (keep (fn [[head & terms]]
+                      (when-let [v (get policy-vocabulary head)]
+                        [v (first terms)]))
+                    facts)]
+    (when (seq decls)
+      (reduce (fn [acc [{:keys [key narrow]} value]]
+                (case narrow
+                  :min (assoc acc key (if-let [prev (get acc key)]
+                                        (min prev value) value))
+                  :intersect (update acc key (fnil conj #{}) value)))
+              {} decls))))
+
+(defn- narrow
+  "Fold one block's policy onto what earlier blocks already allowed.
+
+  This is where the safety property lives. A cap only ever shrinks; an
+  allowlist only ever intersects. A block that raises a ceiling or adds a
+  network is not honoured -- it is a token trying to grant itself more than it
+  was given, which is the one thing attenuation must make impossible."
+  [acc b]
+  (if (nil? acc)
+    b
+    (reduce (fn [m [k v]]
+              (let [prev (get m k)]
+                (cond
+                  (nil? prev) (assoc m k v)
+                  (number? v) (assoc m k (min prev v))
+                  :else (assoc m k (into #{} (filter prev) v)))))
+            acc b)))
+
+(defn policy-from-facts
+  "Blocks of facts -> the policy `plan` takes, or nil when no block declared one.
+
+  `blocks` is a sequence of fact vectors, authority block first, in the order
+  the token carries them -- the host has verified the signature chain and read
+  the facts out before calling this. Keeping it over plain facts is why this
+  library still has no token dependency: what arrives is data, and the
+  narrowing rules are visible without knowing where it came from.
+
+  nil is the honest answer for a token that says nothing about spending, and it
+  composes with `plan`, which refuses without a policy. A token that grants no
+  spending authority and a caller who forgot to pass one are the same
+  situation, and they get the same answer."
+  [blocks]
+  (reduce narrow nil (keep block-policy blocks)))
