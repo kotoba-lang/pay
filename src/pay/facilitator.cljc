@@ -502,13 +502,41 @@
 
 (defn discovery
   "A facilitator discovery document listing the schemes/networks this
-  facilitator supports and its endpoints. Served at /.well-known/x402."
-  [{:keys [verify-url settle-url]}]
-  {:x402Version x402/x402-version
-   :facilitator {:verify verify-url :settle settle-url}
-   :schemes ["transaction" "exact"]
-   :networks ["base"]
-   :asset {:symbol "USDC" :address x402/usdc-base :network "base" :decimals 6}})
+  facilitator supports and its endpoints. Served at /.well-known/x402.
+
+  `schemes` and `networks` are REQUIRED and come from the host, because only
+  the host knows what it can actually produce a verdict for. They used to be
+  the literals `[\"transaction\" \"exact\"]` and `[\"base\"]`, and both had
+  drifted from the deployment by 2026-08-31:
+
+  - `exact` was announced by a facilitator that HOLDS NO KEYS. Settling an
+    EIP-3009 authorization means submitting it on-chain, and nothing here can:
+    the on-chain verdict path reads a receipt for a `txHash` a buyer already
+    broadcast. A buyer that believed the announcement and built an
+    authorization had nobody to give it to.
+  - `base-sepolia` was NOT announced, while `nexus.apply/settleable-networks`
+    accepted it and `treasury/chains` could verify it — so a seller reading
+    this document concluded that proving a paid path without moving value was
+    impossible, when it was already supported.
+
+  Announcing more than you can do and less than you can do are the same defect
+  with the sign flipped, and a literal in a builder cannot be either right or
+  wrong about a deployment it never sees. Missing arguments throw rather than
+  defaulting: a document that quietly describes some other facilitator is worse
+  than no document, and this is called once at startup-shaped code.
+
+  `testnets` is optional and marks which of `networks` carry no value, so a
+  client does not have to infer it from the name."
+  [{:keys [verify-url settle-url schemes networks testnets]}]
+  (when-not (and (seq schemes) (seq networks))
+    (throw (ex-info "pay.facilitator/discovery: :schemes and :networks are required — a discovery document must describe THIS deployment, and the literals it used to default to had drifted from it in both directions"
+                    {:schemes schemes :networks networks})))
+  (cond-> {:x402Version x402/x402-version
+           :facilitator {:verify verify-url :settle settle-url}
+           :schemes (vec schemes)
+           :networks (vec networks)
+           :asset {:symbol "USDC" :address x402/usdc-base :network "base" :decimals 6}}
+    (seq testnets) (assoc :testnets (vec testnets))))
 
 ;; ── receivables: the protocol fee as an INVOICE, not an on-chain split ──
 ;;
