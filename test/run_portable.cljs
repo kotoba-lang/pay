@@ -25,4 +25,5 @@
 
 (t/run-tests 'pay.core-test
               'pay.facilitator-test
-              'pay.x402-test)
+              'pay.x402-test
+              'pay.x402-buyer-test)
