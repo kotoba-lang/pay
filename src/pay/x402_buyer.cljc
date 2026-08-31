@@ -247,10 +247,23 @@
 (defn payment-header
   "A payment envelope as the `X-PAYMENT` header value, or nil for a refusal.
 
+  `json-encode` is required and is the host's JSON serializer
+  (`#(js/JSON.stringify (clj->js %))` in a Worker or under nbb). This library
+  does not serialize JSON — `x402/encode-header` takes an ALREADY-SERIALIZED
+  string and only does the base64 envelope, which is what keeps `pay`
+  zero-dependency.
+
+  Handing it the map instead was measured on 2026-08-31 against the live
+  gateway: base64 of a map's print form is not JSON, the facilitator's
+  `decode-payment` threw, nil came back, and `nil payment` takes the same
+  branch as no header at all — so a buyer that HAD paid was answered
+  `X-PAYMENT header is required`. Requiring the serializer is why that
+  particular silence cannot be produced from here again.
+
   nil rather than the refusal encoded: a header built out of a refusal is a
   request that looks paid."
-  [payment]
+  [payment json-encode]
   (when-not (:refuse payment)
-    (x402/encode-header payment)))
+    (x402/encode-header (json-encode payment))))
 
 (defn payable? [r] (some? (:pay r)))

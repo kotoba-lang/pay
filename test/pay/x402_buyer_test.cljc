@@ -1,5 +1,6 @@
 (ns pay.x402-buyer-test
   (:require [clojure.test :refer [deftest is testing]]
+            [pay.x402 :as x402]
             [pay.x402-buyer :as buyer]))
 
 (def usdc "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913")
@@ -13,6 +14,11 @@
           :maxAmountRequired "1000"} m))
 
 (defn- challenge [& os] {:x402Version 1 :accepts (vec os)})
+
+(defn- fake-json
+  "A stand-in serializer. This library does not serialize JSON — the host does,
+  and the point of the parameter is that it CANNOT be skipped."
+  [x] (pr-str x))
 
 ;; ── the one that matters most ───────────────────────────────────────────────
 
@@ -226,11 +232,17 @@
     (is (= :buyer/no-payer-account (:refuse (buyer/credits-payment cr {:cacao "c"}))))
     (testing "拒否は header にならない —— 払っていない request が
               払ったように見える形を作らない"
-      (is (nil? (buyer/payment-header (buyer/credits-payment cr {:payer "bot"})))))
+      (is (nil? (buyer/payment-header (buyer/credits-payment cr {:payer "bot"}) fake-json))))
     (testing "揃っていれば、facilitator が読む flat な形になる"
       (let [p (buyer/credits-payment cr {:payer "did:key:zBot" :cacao "eyJ…"})]
         (is (= "credits" (:scheme p)))
         (is (= "murakumo" (:network p)))
         (is (= {:payer "did:key:zBot" :amount 1 :to "murakumo" :cacao "eyJ…"}
                (:payload p)))
-        (is (string? (buyer/payment-header p)))))))
+        (is (string? (buyer/payment-header p fake-json)))
+        (testing "header は base64(JSON) —— 直列化していない値を渡すと
+                  facilitator の decode が throw し、その nil は
+                  『ヘッダが無い』と同じ枝に落ちる（2026-08-31 実測）"
+          (is (= (pr-str p) (fake-json p)) "この test の serializer は素通し")
+          (is (= (buyer/payment-header p fake-json)
+                 (x402/encode-header (fake-json p)))))))))
