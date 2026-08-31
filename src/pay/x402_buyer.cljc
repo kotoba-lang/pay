@@ -51,16 +51,34 @@
 (defn- blank? [s] (or (nil? s) (and (string? s) (str/blank? s))))
 
 (defn- parse-amount
-  "Base units as a non-negative integer, or nil.
+  "The quoted amount as a non-negative number, or nil.
 
   nil rather than 0: an unreadable amount is not a free offer, and returning 0
-  would make a malformed challenge the cheapest one on the table."
+  would make a malformed challenge the cheapest one on the table.
+
+  DECIMALS ARE READ, because not every rail is denominated in base units. A
+  chain asset quotes an integer by definition — USDC's `10000` is 10000 base
+  units of six-decimal USDC — but a LEDGER rail has no base unit, and
+  kotobase's storage read is priced at `0.1` credits against murakumo's
+  `1`. Measured 2026-08-31 against the live gateway: an integer-only parser
+  answered `:buyer/unreadable-amount` for every fractional credits offer, which
+  is an honest refusal of a perfectly well formed one — the storage rail was
+  unreachable for that reason alone.
+
+  A decimal on a base-unit rail is the seller quoting wrong, and it is not this
+  function's business to correct it: the cap it is compared against is in the
+  same units either way, so reading it changes nothing except that the buyer
+  can say what it saw."
   [v]
   (cond
-    (integer? v) (when-not (neg? v) v)
-    (string? v) (when (re-matches #"\d+" (str/trim v))
-                  #?(:clj (Long/parseLong (str/trim v))
-                     :cljs (js/parseInt (str/trim v) 10)))
+    (number? v) (when-not (neg? v) v)
+    (string? v) (let [t (str/trim v)]
+                  (when (re-matches #"\d+(\.\d+)?" t)
+                    #?(:clj (if (str/includes? t ".")
+                              (Double/parseDouble t)
+                              (Long/parseLong t))
+                       :cljs (let [n (js/parseFloat t)]
+                               (when (js/isFinite n) n)))))
     :else nil))
 
 (defn- amount-of [req]

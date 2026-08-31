@@ -246,3 +246,31 @@
           (is (= (pr-str p) (fake-json p)) "この test の serializer は素通し")
           (is (= (buyer/payment-header p fake-json)
                  (x402/encode-header (fake-json p)))))))))
+
+;; ── not every rail has a base unit ──────────────────────────────────────────
+
+(deftest a-ledger-rail-may-quote-a-fraction
+  (testing "kotobase の読み取りは 0.1 credit。整数しか読まない parser は
+            それを :buyer/unreadable-amount にする —— 完全に正しい offer を
+            honest に拒否してしまい、rail はその理由だけで到達不能になる
+            （2026-08-31 live 実測）"
+    (let [pol {:schemes #{"credits"} :networks #{"murakumo"} :assets #{"CREDITS"}
+               :pay-tos #{"kotobase"} :caps {["murakumo" "CREDITS"] 1}}
+          r (buyer/plan (challenge (credits-offer :payTo "kotobase"
+                                                  :maxAmountRequired "0.1"))
+                        pol)]
+      (is (buyer/payable? r))
+      (is (= 0.1 (get-in r [:pay :amount]))))
+    (testing "小数でも cap は cap"
+      (let [pol {:schemes #{"credits"} :networks #{"murakumo"} :assets #{"CREDITS"}
+                 :pay-tos #{"kotobase"} :caps {["murakumo" "CREDITS"] 0.05}}
+            r (buyer/plan (challenge (credits-offer :payTo "kotobase"
+                                                    :maxAmountRequired "0.1"))
+                          pol)]
+        (is (= :buyer/over-cap (:refuse r)))))
+    (testing "読めない値は今も読めない —— 小数を許すことは何でも許すことではない"
+      (doseq [bad ["" "free" "1e3" "-1" "0x10" "1.2.3"]]
+        (is (= :buyer/unreadable-amount
+               (:refuse (buyer/plan (challenge (credits-offer :maxAmountRequired bad))
+                                    (assoc two-rail-policy :prefer [["murakumo" "CREDITS"]]))))
+            (str (pr-str bad) " must stay unreadable"))))))
