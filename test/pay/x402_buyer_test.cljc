@@ -274,3 +274,54 @@
                (:refuse (buyer/plan (challenge (credits-offer :maxAmountRequired bad))
                                     (assoc two-rail-policy :prefer [["murakumo" "CREDITS"]]))))
             (str (pr-str bad) " must stay unreadable"))))))
+
+;; ── a policy that came from a token ─────────────────────────────────────────
+
+(deftest a-later-block-cannot-raise-a-ceiling
+  (testing "**attenuation が不可能にしなければならない唯一のこと** ——
+            token が自分に、与えられた以上を与えること"
+    (is (= 1000 (:max-amount (buyer/policy-from-facts
+                              ['[[max-amount 1000]] '[[max-amount 5000]]]))))
+    (is (= 500 (:max-amount (buyer/policy-from-facts
+                             ['[[max-amount 1000]] '[[max-amount 500]]]))))))
+
+(deftest a-later-block-cannot-add-a-network
+  (testing "allowlist は交差するだけ。増やせない"
+    (let [p (buyer/policy-from-facts
+             ['[[network "base"]] '[[network "ethereum"]]])]
+      (is (= #{} (:networks p)) "共通は空 —— 何も許さない policy であって、両方ではない"))
+    (let [p (buyer/policy-from-facts
+             ['[[network "base"] [network "ethereum"]] '[[network "base"]]])]
+      (is (= #{"base"} (:networks p))))))
+
+(deftest silence-from-a-block-does-not-loosen-what-another-set
+  (testing "何も言わない block は「全部許す」ではない"
+    (let [p (buyer/policy-from-facts
+             ['[[max-amount 100]] '[[unrelated "fact"]] '[[network "base"]]])]
+      (is (= 100 (:max-amount p)))
+      (is (= #{"base"} (:networks p))))))
+
+(deftest a-token-that-says-nothing-about-spending-yields-no-policy
+  (testing "そして nil は `plan` が拒否する —— 支出権限を与えない token と、
+            policy を渡し忘れた呼び手は同じ状況で、同じ答えを得る"
+    (is (nil? (buyer/policy-from-facts ['[[scope "kotoba://graph/acme"]]])))
+    (is (nil? (buyer/policy-from-facts [])))
+    (is (= :buyer/no-policy
+           (:refuse (buyer/plan (challenge (offer))
+                                (buyer/policy-from-facts ['[[user "alice"]]])))))))
+
+(deftest a-policy-from-a-token-drives-the-plan
+  (testing "端から端まで —— token の fact が、実際に払う判断を縛る"
+    (let [p (buyer/policy-from-facts
+             [(list ['max-amount 2000] ['network "base"] ['asset usdc] ['pay-to treasury]
+                    ['scheme "exact"] ['scheme "transaction"])
+              (list ['max-amount 1000])])]
+      (is (= 1000 (:max-amount p)))
+      (is (buyer/payable? (buyer/plan (challenge (offer :maxAmountRequired "1000")) p)))
+      (is (= :buyer/over-cap
+             (:refuse (buyer/plan (challenge (offer :maxAmountRequired "1001")) p)))
+          "発行者は 2000 まで許したが、狭めた token では 1001 が通らない"))))
+
+(deftest one-declaration-per-block-narrows-within-the-block-too
+  (testing "同じ block に max-amount が 2 つあれば、小さい方が効く"
+    (is (= 50 (:max-amount (buyer/policy-from-facts ['[[max-amount 100] [max-amount 50]]]))))))
