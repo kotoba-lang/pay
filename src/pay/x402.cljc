@@ -43,6 +43,36 @@
 ;; USDC on Base L2 (Coinbase Bridged), 6 decimals — same asset kotoba-lang/
 ;; treasury's `base` chain uses; the default settlement asset.
 (def usdc-base "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913")
+(def usdc-base-sepolia "0x036CbD53842c5426634e7929541eC2318f3dCF7e")
+
+(def usdc-by-network
+  "USDC per network, under both the plain name and the CAIP-2 form the v2
+  shape uses.
+
+  A requirement names an amount, a chain and a TOKEN, and the three have to
+  agree: an offer saying base-sepolia while naming mainnet USDC asks for a
+  token that does not exist where it says to send it.
+
+  Measured 2026-09-01 -- that offer was live. `:asset` fell back to `usdc-base`
+  whatever the network said, so every testnet listing carried the mainnet
+  token. A buyer whose policy allowlisted Sepolia USDC refused it as
+  asset-not-allowed, against a seller genuinely selling on the testnet. The
+  allowlist caught it and nothing else would have: the offer is well formed and
+  every field is individually plausible."
+  {"base" usdc-base
+   "base-sepolia" usdc-base-sepolia
+   "eip155:8453" usdc-base
+   "eip155:84532" usdc-base-sepolia})
+
+(defn usdc-for
+  "The USDC address for `network`, or a refusal. No fallback to mainnet: an
+  unknown network means this namespace does not know which token to name, and
+  naming the wrong one produces an offer that reads as valid and cannot be
+  paid."
+  [network]
+  (or (usdc-by-network network)
+      (throw (ex-info "no USDC address known for this network"
+                      {:type :x402/unknown-network :network network}))))
 
 (defn- parse-int
   [s]
@@ -89,7 +119,7 @@
    :mimeType mime-type
    :payTo pay-to
    :maxTimeoutSeconds max-timeout-seconds
-   :asset (or asset usdc-base)
+   :asset (or asset (usdc-for network))
    :extra {:name "USD Coin" :version "2"}})
 
 (defn challenge
@@ -111,7 +141,7 @@
   {:scheme "exact"
    :network network
    :amount (str (pay/parse-usdc (str usd)))
-   :asset (or asset usdc-base)
+   :asset (or asset (usdc-for network))
    :payTo pay-to
    :maxTimeoutSeconds max-timeout-seconds
    :extra (merge {:name "USD Coin" :version "2"

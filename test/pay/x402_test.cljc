@@ -162,3 +162,21 @@
       (is (not (:authorized? r)))
       (is (= :x402/invalid-payment (:reason r)))
       (is (some #{:x402/underpaid} (:errors r))))))
+
+(deftest the-asset-follows-the-network
+  (testing "amount, chain, token の 3 つは一致していなければならない。
+            base-sepolia と言いながら mainnet USDC を名指す offer は、
+            存在しないトークンを、そこに無い場所へ送れと言っている"
+    (is (= x402/usdc-base
+           (:asset (x402/payment-requirements {:pay-to "0xA" :usd "0.001" :network "base"}))))
+    (is (= "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+           (:asset (x402/payment-requirements {:pay-to "0xA" :usd "0.001" :network "base-sepolia"}))))))
+
+(deftest an-unknown-network-refuses-rather-than-naming-mainnet
+  (testing "既定に落とすと、well-formed で払えない offer ができる"
+    (is (thrown? #?(:clj Exception :cljs :default)
+                 (x402/payment-requirements {:pay-to "0xA" :usd "0.001" :network "solana"})))))
+
+(deftest an-explicit-asset-still-wins
+  (is (= "0xdead" (:asset (x402/payment-requirements
+                           {:pay-to "0xA" :usd "0.001" :network "base" :asset "0xdead"})))))
