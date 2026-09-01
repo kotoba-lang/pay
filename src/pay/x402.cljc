@@ -103,6 +103,35 @@
 
 ;; ─── 402 challenge (seller side) ────────────────────────────────────
 
+(def eip712-domain-by-network
+  "The EIP-712 domain the USDC contract on each network actually declares.
+
+  NOT a constant. `extra.name` is the domain name a buyer signs under for the
+  `exact` scheme, and a domain that differs from the contract's own produces a
+  signature that recovers a DIFFERENT address -- so every payment is rejected,
+  and rejected as a bad signature, which points at the buyer rather than at
+  the offer that told it what to sign.
+
+  Measured 2026-09-01 by calling name() and version() on both contracts:
+  base mainnet 0x833589fC is `USD Coin`/`2`, base-sepolia 0x036CbD53 is
+  `USDC`/`2`. Every offer this workspace serves carried `USD Coin`, testnet
+  ones included. This is the same defect `usdc-by-network` was written for --
+  a per-network value left as a constant beside a field that was fixed -- and
+  it was on the same three live base-sepolia listings."
+  {"base"          {:name "USD Coin" :version "2"}
+   "base-sepolia"  {:name "USDC" :version "2"}
+   "eip155:8453"   {:name "USD Coin" :version "2"}
+   "eip155:84532"  {:name "USDC" :version "2"}})
+
+(defn eip712-domain-for
+  "The EIP-712 domain for a network, or a throw. Refuses rather than guessing:
+  a wrong domain is silently unspendable, and defaulting to the mainnet name
+  is exactly how every testnet offer came to carry it."
+  [network]
+  (or (eip712-domain-by-network network)
+      (throw (ex-info "no USDC EIP-712 domain known for this network"
+                      {:type :x402/unknown-network :network network}))))
+
 (defn payment-requirements
   "One accepted payment option for the 402 body. `usd` is priced through
   pay.core/parse-usdc so maxAmountRequired is USDC micros as a string
@@ -120,7 +149,7 @@
    :payTo pay-to
    :maxTimeoutSeconds max-timeout-seconds
    :asset (or asset (usdc-for network))
-   :extra {:name "USD Coin" :version "2"}})
+   :extra (eip712-domain-for network)})
 
 (defn challenge
   "The 402 response body: {:x402Version :accepts [reqs…] :error}. Pass one
@@ -144,8 +173,8 @@
    :asset (or asset (usdc-for network))
    :payTo pay-to
    :maxTimeoutSeconds max-timeout-seconds
-   :extra (merge {:name "USD Coin" :version "2"
-                  :assetTransferMethod "eip3009"}
+   :extra (merge (eip712-domain-for network)
+                 {:assetTransferMethod "eip3009"}
                  extra)})
 
 (defn v2-payment-required

@@ -180,3 +180,28 @@
 (deftest an-explicit-asset-still-wins
   (is (= "0xdead" (:asset (x402/payment-requirements
                            {:pay-to "0xA" :usd "0.001" :network "base" :asset "0xdead"})))))
+
+(deftest eip712-domain-is-per-network-not-a-constant
+  ;; A domain that differs from the contract's own makes the buyer's signature
+  ;; recover a different address, so the payment is rejected as a bad
+  ;; signature -- blaming the buyer for a value the offer supplied. Measured
+  ;; 2026-09-01 by calling name() on both contracts.
+  (testing "base mainnet USDC declares USD Coin"
+    (is (= {:name "USD Coin" :version "2"}
+           (:extra (x402/payment-requirements
+                    {:pay-to "0xA00366234D29d4F882088048c0B2fa0dB7302D4E"
+                     :usd "0.001" :resource "/r" :network "base"})))))
+  (testing "base-sepolia USDC declares USDC, and every offer used to say USD Coin"
+    (is (= {:name "USDC" :version "2"}
+           (:extra (x402/payment-requirements
+                    {:pay-to "0xA00366234D29d4F882088048c0B2fa0dB7302D4E"
+                     :usd "0.001" :resource "/r" :network "base-sepolia"})))))
+  (testing "the CAIP-2 spellings agree with the plain ones"
+    (is (= (x402/eip712-domain-for "base") (x402/eip712-domain-for "eip155:8453")))
+    (is (= (x402/eip712-domain-for "base-sepolia") (x402/eip712-domain-for "eip155:84532"))))
+  (testing "the v2 builder carries the same domain, not the mainnet one"
+    (is (= "USDC" (:name (:extra (x402/v2-payment-requirements
+                                  {:pay-to "0xA0" :usd "0.001" :network "eip155:84532"}))))))
+  (testing "an unknown network is refused, because a wrong domain is silently unspendable"
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                 (x402/eip712-domain-for "optimism")))))
