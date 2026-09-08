@@ -27,7 +27,7 @@
   integer. In ClojureScript this is a JS number — safe below 2^53 micros
   (≈ 9.0e9 USDC), far above any realistic creator payment; wire records
   should carry amounts as strings (see `->receipt`)."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 ;; ─── USDC units ─────────────────────────────────────────────────────
 
