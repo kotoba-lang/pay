@@ -27,7 +27,7 @@
     the payload carries its hash. This maps 1:1 onto our existing
     treasury/verify-payment + pay.core/entitle path (club-shinshi's claim flow),
     so an agent and a human wallet share one rail."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [pay.core :as pay]))
 
 (def x402-version 1)
@@ -79,7 +79,7 @@
   #?(:clj  (try (Long/parseLong (str s)) (catch Exception _ 0))
      :cljs (let [n (js/parseInt (str s) 10)] (if (js/isNaN n) 0 n))))
 
-(defn- lc [s] (some-> s str str/lower-case))
+(defn- lc [s] (some-> s str str/lower))
 
 ;; ─── base64 header codec (UTF-8, portable) ──────────────────────────
 ;; The X-PAYMENT / X-PAYMENT-RESPONSE header values are base64 of a JSON

@@ -4,7 +4,12 @@
  ;; backing. base-l2 performs no I/O of its own either -- it is pure over an
  ;; injected transport and an injected bundler -- so "zero network I/O, zero
  ;; key custody" still holds.
- :deps {io.github.kotoba-lang/base-l2
+ :deps {
+        ;; kotoba.lang.text, not clojure.string. Pinned as an explicit floor:
+        ;; tools.deps takes the NEWEST sha it is shown, so without a floor here
+        ;; this repo silently rides whatever a sibling happens to name.
+        io.github.kotoba-lang/text {:git/sha "73bdb13ae7a3d004b44bca08be03a3191157a38f"}
+       io.github.kotoba-lang/base-l2
         {:git/url "https://github.com/kotoba-lang/base-l2"
          :git/sha "6f741ec4b2df4112db2c7bd23c5327a8ee17faa9"}}
  :aliases {:test {:extra-paths ["test"]

@@ -39,7 +39,7 @@
   A buyer that refuses everything must be able to say which constraint bit.
   Collapsing `over-cap` into a generic `not-acceptable` is how a spend limit
   becomes indistinguishable from a typo in an asset address."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [pay.x402 :as x402]))
 
 (def ^:private amount-keys

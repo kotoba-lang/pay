@@ -24,7 +24,7 @@
   3. `settle` / `gate` — the `/settle` decision and the end-to-end gateway
      decision (no X-PAYMENT -> 402 challenge; X-PAYMENT -> verify -> serve or
      hold), reusing pay.x402's challenge/authorize/entitle philosophy."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [pay.x402 :as x402]))
 
 ;; ── rules engine / seller registry ──────────────────────────────────
@@ -55,8 +55,8 @@
   (some (fn [r]
           (when (and (or (nil? (:seller r)) (= (:seller r) seller))
                      (or (nil? (:method r))
-                         (= (str/upper-case (:method r))
-                            (str/upper-case (or method "GET"))))
+                         (= (str/upper (:method r))
+                            (str/upper (or method "GET"))))
                      (string? (:path-prefix r))
                      (str/starts-with? (or path "") (:path-prefix r)))
             r))
@@ -119,7 +119,7 @@
     (not (string? seller))                    (conj :facilitator/missing-seller)
     (and (string? seller) (str/blank? seller)) (conj :facilitator/blank-seller)
     (and (string? seller)
-         (contains? reserved-seller-names (str/lower-case seller)))
+         (contains? reserved-seller-names (str/lower seller)))
     (conj :facilitator/reserved-seller)
     (and (string? seller) (not (re-matches #"[a-z0-9][a-z0-9-]{0,62}" seller)))
     (conj :facilitator/malformed-seller)))
@@ -255,8 +255,8 @@
         covers? (fn [a b]
                   (and (or (nil? (:seller a)) (= (:seller a) (:seller b)))
                        (or (nil? (:method a))
-                           (= (str/upper-case (or (:method a) ""))
-                              (str/upper-case (or (:method b) "GET"))))
+                           (= (str/upper (or (:method a) ""))
+                              (str/upper (or (:method b) "GET"))))
                        (string? (:path-prefix a)) (string? (:path-prefix b))
                        (str/starts-with? (:path-prefix b) (:path-prefix a))))]
     (vec (for [j (range (count v))
@@ -720,4 +720,4 @@
   and network so the same hash on two chains is two records -- tx hashes are
   not globally unique across chains."
   [{:keys [network tx-hash]}]
-  (str "x402:spent:" (or network "unknown") ":" (some-> tx-hash str/lower-case)))
+  (str "x402:spent:" (or network "unknown") ":" (some-> tx-hash str/lower)))
