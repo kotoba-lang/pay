@@ -242,8 +242,8 @@ registry. **0 today.**
 ## Dev
 
 ```bash
-clojure -M:test    # cognitect test-runner
-clojure -M:lint    # clj-kondo, errors fail
+kbb -M:test    # cognitect test-runner
+kbb -M:lint    # clj-kondo, errors fail
 ```
 
 Apache-2.0.
