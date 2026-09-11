@@ -605,3 +605,22 @@
       (is (= "500000" (:maxAmountRequired (:requirements g))))
       (is (= (:requirements g) (first (:accepts g))))
       (is (nil? (:reason g))))))
+
+(deftest credit-payment-multinetwork-selection
+  (let [main {:seller "murakumo" :method "POST" :path-prefix "/x402/"
+              :chain "base" :usd "0.01" :pay-to "0xtreasury"
+              :credits "1" :credits-to "murakumo"}
+        testnet (dissoc (assoc main :chain "base-sepolia") :credits :credits-to)
+        req {:seller "murakumo" :method "POST" :path "/x402/v1/chat/completions"}
+        payment {:scheme "credits" :network "murakumo"}]
+    (is (= main (fac/rule-for-payment [testnet main] req payment)))
+    (is (= main (fac/rule-for-payment [main testnet] req payment)))
+    (is (= main (fac/rule-for-payment [main] req payment)))
+    (is (nil? (fac/rule-for-payment [testnet] req payment)))
+    (is (nil? (fac/rule-for-payment [main testnet] req (assoc payment :network "base"))))
+    (is (nil? (fac/rule-for-payment [main testnet] req (dissoc payment :network))))
+    (is (nil? (fac/rule-for-payment [main testnet] (assoc req :seller "other") payment)))
+    (is (= testnet (fac/rule-for-payment [main testnet] req {:scheme "transaction" :network "base-sepolia"})))
+    (is (nil? (fac/rule-for-payment [main testnet] req {:scheme "transaction"})))
+    (is (nil? (fac/rule-for-payment [main testnet] req {:scheme "transaction" :network "unknown"}))))
+)

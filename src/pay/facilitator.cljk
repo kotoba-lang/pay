@@ -49,6 +49,41 @@
 
 (defn valid-rule? [rule] (empty? (rule-errors rule)))
 
+(defn- rule-matches? [r {:keys [seller method path]}]
+  (and (or (nil? (:seller r)) (= (:seller r) seller))
+       (or (nil? (:method r))
+           (= (str/upper (:method r)) (str/upper (or method "GET"))))
+       (string? (:path-prefix r))
+       (str/starts-with? (or path "") (:path-prefix r))))
+
+(defn match-rules
+  "EVERY rule matching the request, in registry order.
+
+  One resource can be priced on more than one chain -- the same answer on
+  mainnet and on a testnet -- and those are different rules with the same path.
+  Returning only the first would offer a buyer one of them and never say the
+  other existed, which for a seller that does accept both is a lie by
+  omission. x402's `accepts` array is the place to say so. Pure."
+  [rules req]
+  (filterv #(rule-matches? % req) rules))
+
+(declare accepts-credits?)
+
+(defn rule-for-payment
+  "Select the offered payment rail. Credits use the ledger network, never
+  an EVM chain. USDC still requires the named chain when several rules match."
+  [rules req payment]
+  (let [ms (match-rules rules req)
+        n (or (:network payment) (get payment "network"))
+        scheme (or (:scheme payment) (get payment "scheme"))]
+    (cond
+      (= "credits" scheme)
+      (when (= "murakumo" n) (first (filter accepts-credits? ms)))
+      (= 1 (count ms)) (first ms)
+      (empty? ms) nil
+      (nil? n) nil
+      :else (first (filter #(= n (:chain %)) ms)))))
+
 (defn match-rule
   "First rule in `rules` matching the request {:seller :method :path}, or nil."
   [rules {:keys [seller method path]}]
