@@ -10,7 +10,7 @@
   JVM and red under nbb for reasons production does not have (SCI deftype
   behaviour), so `.cljc` alone is not grounds.
 
-      npx nbb --classpath $(clojure -A:test -Spath) run-tests.cljs
+      npx nbb --classpath $(clojure -A:test -Spath) run-tests.cljk
 
   The classpath comes from `clojure -Spath` rather than a literal `src:test`
   because `pay.rail.base-l2` needs kotoba-lang/base-l2 (and, transitively,
