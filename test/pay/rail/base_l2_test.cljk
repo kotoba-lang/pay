@@ -6,7 +6,7 @@
   transaction. What the fakes cannot fake is asserted against `erc20.core`
   instead — an independent encoder whose selectors are keccak-verified in its
   own CI — so a wrong recipient or a wrong amount in the calldata is caught."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [pay.core :as pay]
             [pay.rail.base-l2 :as rail]
             [kotoba.lang.base-l2.abi :as abi]
