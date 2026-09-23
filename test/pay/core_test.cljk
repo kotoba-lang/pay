@@ -1,5 +1,5 @@
 (ns pay.core-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [pay.core :as pay]))
 
 (deftest usdc-units

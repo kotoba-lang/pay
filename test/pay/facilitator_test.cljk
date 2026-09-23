@@ -1,5 +1,5 @@
 (ns pay.facilitator-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.text :as str]
             [pay.facilitator :as fac]
             [pay.x402 :as x402]))

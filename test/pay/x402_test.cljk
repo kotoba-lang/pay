@@ -1,5 +1,5 @@
 (ns pay.x402-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [pay.x402 :as x402]))
 
 (def now 1783000000) ;; fixed epoch seconds for deterministic expiry tests
