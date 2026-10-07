@@ -90,3 +90,22 @@
     (is (= (str/lower x402/usdc-base-sepolia) (str "0x" (eth/bytes->hex (:to tx)))))
     (is (= (subs cast-calldata 2) (eth/bytes->hex (:data tx))))
     (is (string? (eth/sign-tx-eip1559 tx (eth/hex->bytes anvil-0-key))))))
+
+(deftest domain-separators-match-chain
+  ;; DOMAIN_SEPARATOR() read from both USDC contracts, 2026-10-07
+  (is (= "02fa7265e7c5d81118673727957699e4d68f74cd74b7db77da710fe8a2c7834f"
+         (eth/bytes->hex (eth/domain-separator (e/domain "eip155:8453")))))
+  (is (= "71f17a3b2ff373b803d70a5a07c046c1a2bc8e89c09ef722fcb047abe94c9818"
+         (eth/bytes->hex (eth/domain-separator (e/domain "eip155:84532"))))))
+
+(deftest simulation-verdicts
+  (is (= [] (e/simulation-errors nil)))
+  (is (= [:eip3009/invalid-signature]
+         (e/simulation-errors "eth_call: execution reverted: FiatTokenV2: invalid signature")))
+  (is (= [:eip3009/insufficient-funds]
+         (e/simulation-errors "execution reverted: ERC20: transfer amount exceeds balance")))
+  (is (= [:eip3009/nonce-used]
+         (e/simulation-errors "execution reverted: FiatTokenV2: authorization is used or canceled")))
+  (is (= [:eip3009/simulation-reverted] (e/simulation-errors "execution reverted")))
+  (is (= {:from anvil-1 :to x402/usdc-base :data cast-calldata}
+         (e/simulation-call "eip155:8453" anvil-1 cast-calldata))))

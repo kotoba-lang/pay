@@ -15,6 +15,9 @@
   - `chain-errors`    — the two facts only a chain has, handed in by the host:
     the payer's USDC balance and whether the authorization nonce is spent.
     `balance-call` / `authorization-state-call` build the `eth_call`s.
+  - `simulation-call` / `simulation-errors` — the transaction itself, run as
+    an `eth_call`: the contract's own verdict, which is the only one that
+    covers EIP-1271 and EIP-7702 accounts (see the section below).
   - `settle-calldata` / `settle-tx` — the `transferWithAuthorization` call
     and the EIP-1559 transaction around it, for the host to sign and send.
 
@@ -24,10 +27,11 @@
   settler key can spend its own ETH and can refuse to settle; it cannot
   redirect a payment, because changing any field breaks the buyer's signature.
 
-  Only externally owned accounts are accepted: the signature must be 65 bytes
-  and recover. A smart-wallet signature (EIP-1271 / EIP-6492) needs an
-  `isValidSignature` call and the `bytes signature` overload, and is refused
-  as `:eip3009/unsupported-signature` rather than half-supported."
+  Only 65-byte signatures are accepted, sent through the `(v, r, s)` overload.
+  A longer smart-wallet signature (EIP-1271 / EIP-6492) needs the `bytes
+  signature` overload and is refused as `:eip3009/unsupported-signature`
+  rather than half-supported. A 65-byte signature from an account with code
+  is judged by the contract, which is why the simulation is the last gate."
   (:require [kotoba.lang.text :as str]
             [eth-crypto.core :as eth]
             [pay.x402 :as x402]))
@@ -206,6 +210,41 @@
       (nil? used) (conj :eip3009/nonce-state-unknown)
       (and used (not= "0" used)) (conj :eip3009/nonce-used))))
 
+;; ─── simulation ─────────────────────────────────────────────────────
+;;
+;; `signature-errors` recovers an address; the contract decides with
+;; SignatureChecker, which asks `isValidSignature` of any `from` that has code.
+;; An EIP-7702-delegated EOA has code (`0xef0100‖delegate`), so for it the
+;; contract's answer is the delegate's, not ecrecover's -- and only the chain
+;; can give it. Measured 2026-10-07: anvil's test key 0 carries a 7702
+;; delegation on Base and Base Sepolia, its signature recovers here, and USDC
+;; reverts `FiatTokenV2: invalid signature`. So a facilitator's last check is
+;; an `eth_call` of the very transaction it would send.
+
+(defn simulation-call
+  "eth_call params for the settlement as `caller` would send it. Any address
+  works for `caller`: transferWithAuthorization does not look at msg.sender."
+  [network caller calldata]
+  {:from caller :to (x402/usdc-for network) :data calldata})
+
+(def ^:private revert-reasons
+  [[#"invalid signature" :eip3009/invalid-signature]
+   [#"exceeds balance" :eip3009/insufficient-funds]
+   [#"authorization is used" :eip3009/nonce-used]
+   [#"authorization is not yet valid" :x402/authorization-not-yet-valid]
+   [#"authorization is expired" :x402/authorization-expired]
+   [#"blacklisted" :eip3009/blacklisted]
+   [#"paused" :eip3009/paused]])
+
+(defn simulation-errors
+  "[] for a simulation that returned; the reason for one that reverted with
+  `message` (the RPC error text)."
+  [message]
+  (if (nil? message)
+    []
+    [(or (some (fn [[re k]] (when (re-find re (str/lower message)) k)) revert-reasons)
+         :eip3009/simulation-reverted)]))
+
 ;; ─── settlement ─────────────────────────────────────────────────────
 
 (defn settle-calldata
@@ -258,6 +297,9 @@
    :eip3009/invalid-number "invalid_payload"
    :eip3009/insufficient-funds "insufficient_funds"
    :eip3009/nonce-used "invalid_transaction_state"
+   :eip3009/blacklisted "invalid_transaction_state"
+   :eip3009/paused "invalid_transaction_state"
+   :eip3009/simulation-reverted "invalid_transaction_state"
    :eip3009/balance-unknown "unexpected_verify_error"
    :eip3009/nonce-state-unknown "unexpected_verify_error"})
 
