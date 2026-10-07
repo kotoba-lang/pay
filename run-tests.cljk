@@ -21,7 +21,8 @@
             [pay.facilitator-test]
             [pay.x402-test]
             [pay.x402-buyer-test]
-            [pay.rail.base-l2-test]))
+            [pay.rail.base-l2-test]
+            [pay.eip3009-test]))
 
 (defmethod t/report [::t/default :end-run-tests] [m]
   (when-not (t/successful? m)
