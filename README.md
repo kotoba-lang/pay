@@ -1,7 +1,7 @@
 # pay
 
 **On-chain creator-payment rail primitives (USDC on Base L2) — pure
-Clojure/ClojureScript (`.cljc`), zero network I/O, zero key custody.**
+kotoba-lang (`.cljk`), zero network I/O, zero key custody.**
 
 Re-homed from `@etzhayyim/sdk`'s payment surface (`pay.ts`: `pay()` /
 `payStream()` / `splitDistribute()` / escrow) as a **vendor-neutral
